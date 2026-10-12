@@ -1,3 +1,4 @@
+import { denyDemoAutomation } from "@/lib/channels/demo-inbound-only";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { protecaoAgendaSupabase } from "@/lib/agenda/protecao-followup";
 /**
@@ -36,6 +37,7 @@ import { decidirPreGoLiveDoCanalViaSupabase } from "@/lib/ai/elegibilidade/consu
 const TIPO = "send_ai_message";
 
 async function postponeUntil(ctx: ActionCtx, config: Record<string, unknown>): Promise<string | null> {
+  denyDemoAutomation();
   const contato = checarGuardasDeContato(ctx);
   if (contato.ok) {
     const protection = (await protecaoAgendaSupabase(ctx.admin, ctx.organizationId, [contato.contact.id])).get(contato.contact.id)!;
@@ -51,6 +53,7 @@ async function postponeUntil(ctx: ActionCtx, config: Record<string, unknown>): P
 }
 
 async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise<ActionResultDetail> {
+  denyDemoAutomation();
   const sessionId = typeof config.channel_session_id === "string" ? config.channel_session_id : null;
   const agentId = typeof config.agent_id === "string" ? config.agent_id : null;
   const instrucao = typeof config.instruction === "string" ? config.instruction.trim() : "";

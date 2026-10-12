@@ -212,6 +212,7 @@ function poolElegibilidade(
   opts: {
     ultimaInboundId?: string;
     aiGate?: string | null;
+    canAssist?: boolean;
     aiGateMode?: string | null;
     aiTestPhoneNumbers?: string[];
     phoneNumber?: string | null;
@@ -230,6 +231,7 @@ function poolElegibilidade(
     if (sql.includes("direction = 'inbound'")) {
       return { rows: [{ id: opts.ultimaInboundId ?? inboundId }] };
     }
+    if (sql.includes('as available')) return { rows: [{ available: opts.canAssist ?? false }] };
     if (sql.includes('channel_metadata')) {
       return {
         rows: [
@@ -355,4 +357,24 @@ it("anti-backlog: ordena a última inbound por coalesce(sent_at, created_at), n�
   expect(consultaUltima).toBeDefined();
   expect(consultaUltima).toContain('coalesce(sent_at, created_at) desc');
   expect(consultaUltima).not.toContain('nulls last');
+});
+
+// A trava do canal não pode ser furada pela autorização nem pelo modo assistido.
+it.each(['off', 'unknown', ''])("gate explícito '%s': sem enqueue em automático e assistido", async aiGate => {
+  for (const canAssist of [false, true]) {
+    const calls: string[] = [];
+    await drainTick(poolElegibilidade(calls, {
+      aiGate, canAssist, aiAuthorizedAt: new Date().toISOString(),
+    }), knobs, log);
+    expect(calls.some(s => s.includes('job_queue'))).toBe(false);
+    expect(calls.some(s => s.includes("status = 'done'"))).toBe(true);
+  }
+});
+
+it("open explícito preserva o canal de demo terminado em 0230", async () => {
+  const calls: string[] = [];
+  await drainTick(poolElegibilidade(calls, {
+    aiGate: 'open', phoneNumber: '+5511999990230', aiAuthorizedAt: null,
+  }), knobs, log);
+  expect(calls.some(s => s.includes('job_queue'))).toBe(true);
 });

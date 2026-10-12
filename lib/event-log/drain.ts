@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Cron driver genérico do event_log — a peça prometida em dispatcher.ts.
  *
@@ -120,6 +121,7 @@ export async function drainEventLog(
   admin: SupabaseClient,
   opts: { limit?: number } = {},
 ): Promise<DrainSummary> {
+  denyDemoWebAction();
   const limit = opts.limit ?? 50;
   const summary: DrainSummary = {
     scanned: 0,

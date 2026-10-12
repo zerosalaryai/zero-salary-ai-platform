@@ -12,12 +12,29 @@ export type SendOutcome =
       crmMessageId: string | null;
     }
   | { kind: "blocked"; idempotencyKey: string };
-type Intent = { tenantId: string; leadId: string | null; jobId: string; seq: number; body: string };
-type Row = { id: string; status: SendLedgerStatus; crm_message_id: string | null };
+type Intent = {
+  tenantId: string;
+  leadId: string | null;
+  jobId: string;
+  seq: number;
+  body: string;
+  acceptedResponse?: unknown;
+};
+type Row = {
+  id: string;
+  status: SendLedgerStatus;
+  crm_message_id: string | null;
+  external_response?: unknown;
+};
 interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
   rotate(input: Intent, hash: string): Promise<string>;
+  /**
+   * Substitui a resposta ligada a uma intenção ainda sem mensagem. A implementação
+   * precisa fazer a prova de ausência e o update na mesma operação atômica.
+   */
+  rebindUnsent?(input: Intent, hash: string, key: string): Promise<boolean>;
   message(org: string, key: string): Promise<{ id: string; status: string } | null>;
   update(
     org: string,
@@ -37,12 +54,13 @@ export async function sendWithLedger(
 ): Promise<SendOutcome> {
   const hash = createHash("sha256").update(input.body).digest("hex");
   let key: string;
+  let prior: Row | null = null;
   try {
     key = await store.create(input, hash);
   } catch (error) {
     if (!(error && typeof error === "object" && "code" in error && error.code === "23505"))
       throw error;
-    const prior = await store.find(input);
+    prior = await store.find(input);
     if (!prior) throw new Error("send_ledger_missing");
     key = prior.id;
     if (prior.status === "accepted")
@@ -51,6 +69,32 @@ export async function sendWithLedger(
     if (prior.status === "failed") key = await store.rotate(input, hash);
   }
   const existing = await store.message(input.tenantId, key);
+
+  // Uma resposta externa v2 já ligada só pode ser trocada quando não há mensagem
+  // CRM e a ausência continua verdadeira no mesmo UPDATE. Se uma mensagem existe,
+  // ela pode ter sido aceita pelo transporte: preserve a resposta anterior.
+  if (
+    prior?.status === "requested" &&
+    input.acceptedResponse !== undefined &&
+    existing === null
+  ) {
+    const rebound = await store.rebindUnsent?.(input, hash, key);
+    if (!rebound) throw new Error("send_ledger_external_response_rebind_ambiguous");
+  }
+
+  if (
+    prior !== null &&
+    input.acceptedResponse !== undefined &&
+    (prior.status === "queued" ||
+      (existing !== null && !["sent", "delivered", "read", "failed"].includes(existing.status)))
+  ) {
+    return {
+      kind: "queued",
+      idempotencyKey: key,
+      crmMessageId: existing?.id ?? prior.crm_message_id,
+    };
+  }
+
   let message = existing;
   if (!message || message.status === "queued") {
     try {
@@ -93,12 +137,96 @@ export async function reconcileAcceptedSend(
   await store.update(input.tenantId, prior.id, "accepted", message.id, null);
   return true;
 }
+
+/**
+ * Recupera somente metadado ligado a uma intenção que o canal já aceitou.
+ * `requested` também é reconciliado com `messages`: cobre o crash depois do
+ * transporte e antes do update do ledger, sem uma segunda geração ou entrega.
+ */
+export async function loadAcceptedExternalResponse(
+  db: Queryable,
+  input: { tenantId: string; jobId: string },
+): Promise<unknown | null> {
+  const binding = await loadExternalResponseBinding(db, input);
+  return binding?.kind === "accepted" ? binding.response : null;
+}
+
+export type ExternalResponseBinding =
+  | { kind: "accepted"; response: unknown }
+  | { kind: "pending"; response: unknown }
+  | { kind: "replaceable"; response: unknown };
+
+/**
+ * Consulta a resposta já ligada antes de gerar outra. Uma mensagem existente ou
+ * um ledger queued é conservadoramente tratado como entrega em voo; só
+ * requested sem mensagem, ou falha explícita, permite uma nova candidata.
+ */
+export async function loadExternalResponseBinding(
+  db: Queryable,
+  input: { tenantId: string; jobId: string },
+): Promise<ExternalResponseBinding | null> {
+  const { rows } = await db.query<{
+    id: string;
+    seq: number;
+    status: SendLedgerStatus;
+    crm_message_id: string | null;
+    external_response: unknown;
+  }>(
+    `select id, seq, status, crm_message_id, external_response
+       from send_ledger
+      where organization_id = $1
+        and job_id = $2
+      order by (external_response is not null) desc, seq desc`,
+    [input.tenantId, input.jobId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  if (row.status === "accepted") return { kind: "accepted", response: row.external_response };
+
+  const store = pgSendLedger(db);
+  const message = await store.message(input.tenantId, row.id);
+  if (message && ["sent", "delivered", "read"].includes(message.status)) {
+    await store.update(input.tenantId, row.id, "accepted", message.id, null);
+    return { kind: "accepted", response: row.external_response };
+  }
+  if (row.status === "failed" || message?.status === "failed") {
+    return { kind: "replaceable", response: row.external_response };
+  }
+  if (row.status === "queued" || message !== null) {
+    return { kind: "pending", response: row.external_response };
+  }
+
+  // A resposta pode ter sido dividida em bolhas, com o metadado v2 somente na
+  // última. Se qualquer bolha irmã já existe/foi aceita, regenerar a resposta
+  // inteira misturaria candidatas. Segure o turno em vez de duplicar conteúdo.
+  for (const sibling of rows.slice(1)) {
+    if (
+      sibling.status === "accepted" ||
+      sibling.status === "queued" ||
+      sibling.crm_message_id !== null
+    ) {
+      return { kind: "pending", response: row.external_response };
+    }
+    const siblingMessage = await store.message(input.tenantId, sibling.id);
+    if (siblingMessage !== null && siblingMessage.status !== "failed") {
+      return { kind: "pending", response: row.external_response };
+    }
+  }
+  return { kind: "replaceable", response: row.external_response };
+}
 export function pgSendLedger(db: Queryable): LedgerStore {
   return {
     async create(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash) values ($1, $2, $3, $4, $5) returning id",
-        [i.tenantId, i.leadId, i.jobId, i.seq, hash],
+        "insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash, external_response) values ($1, $2, $3, $4, $5, $6) returning id",
+        [
+          i.tenantId,
+          i.leadId,
+          i.jobId,
+          i.seq,
+          hash,
+          i.acceptedResponse === undefined ? null : JSON.stringify(i.acceptedResponse),
+        ],
       );
       if (!rows[0]) throw new Error("send_ledger_insert_missing");
       return rows[0].id;
@@ -112,11 +240,48 @@ export function pgSendLedger(db: Queryable): LedgerStore {
     },
     async rotate(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
-        [i.tenantId, i.jobId, i.seq, hash],
+        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,external_response=$5,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
+        [
+          i.tenantId,
+          i.jobId,
+          i.seq,
+          hash,
+          i.acceptedResponse === undefined ? null : JSON.stringify(i.acceptedResponse),
+        ],
       );
       if (!rows[0]) throw new Error("send_ledger_rotation_missing");
       return rows[0].id;
+    },
+    async rebindUnsent(i, hash, key) {
+      const { rows } = await db.query<{ id: string }>(
+        `update send_ledger as ledger
+            set body_hash=$4,
+                external_response=$5,
+                last_error=null,
+                updated_at=now()
+          where ledger.organization_id=$1
+            and ledger.job_id=$2
+            and ledger.seq=$3
+            and ledger.id=$6
+            and ledger.status='requested'
+            and ledger.crm_message_id is null
+            and not exists (
+              select 1
+                from messages
+               where organization_id=$1
+                 and metadata->>'idempotency_key'=$6
+            )
+          returning ledger.id`,
+        [
+          i.tenantId,
+          i.jobId,
+          i.seq,
+          hash,
+          i.acceptedResponse === undefined ? null : JSON.stringify(i.acceptedResponse),
+          key,
+        ],
+      );
+      return rows.length === 1;
     },
     async message(org, key) {
       const { rows } = await db.query<{ id: string; status: string }>(
@@ -144,7 +309,8 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
           job_id: i.jobId,
           seq: i.seq,
           body_hash: hash,
-        })
+          external_response: i.acceptedResponse ?? null,
+        } as never)
         .select("id")
         .single();
       if (error) throw error;
@@ -168,10 +334,11 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
           id: crypto.randomUUID(),
           status: "requested",
           body_hash: hash,
+          external_response: i.acceptedResponse ?? null,
           crm_message_id: null,
           last_error: null,
           updated_at: new Date().toISOString(),
-        })
+        } as never)
         .eq("organization_id", i.tenantId)
         .eq("job_id", i.jobId)
         .eq("seq", i.seq)
@@ -179,6 +346,11 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         .single();
       if (error) throw error;
       return data.id;
+    },
+    // PostgREST não oferece aqui a prova atômica cross-table exigida para
+    // substituir metadado. Falha fechada; o runtime do agente usa o store PG.
+    async rebindUnsent() {
+      return false;
     },
     async message(org, key) {
       const { data, error } = await db

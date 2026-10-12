@@ -1,3 +1,5 @@
+import { readDemoWebConfig, DemoWebDenied } from "@/lib/channels/demo-web-ingress";
+import { bindDemoWebToken, withDemoWebInbound } from "@/lib/channels/demo-web-binding";
 /**
  * GET|POST /api/v1/webhooks/meta/[token] — webhook da WhatsApp Cloud API.
  *
@@ -47,7 +49,9 @@ interface RouteCtx {
 
 export async function GET(req: NextRequest, ctx: RouteCtx): Promise<NextResponse> {
   const { token } = await ctx.params;
-  const session = await metaSessionByWebhookToken(token);
+  const demo = readDemoWebConfig() ? await bindDemoWebToken(token) : undefined;
+  const session = demo ? { id: demo.binding.id, organizationId: demo.binding.organization_id,
+    wabaId: demo.binding.meta_waba_id } : await metaSessionByWebhookToken(token);
   if (!session) return new NextResponse("not found", { status: 404 });
 
   // Do BANCO (platform_meta_app, migration 0257), com o `.env` como piso: é a
@@ -69,7 +73,9 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
   const requestId = randomUUID();
   const { token } = await ctx.params;
 
-  const session = await metaSessionByWebhookToken(token);
+  const demo = readDemoWebConfig() ? await bindDemoWebToken(token) : undefined;
+  const session = demo ? { id: demo.binding.id, organizationId: demo.binding.organization_id,
+    wabaId: demo.binding.meta_waba_id } : await metaSessionByWebhookToken(token);
   if (!session) return fail("not_found", "unknown webhook token", 404, { requestId });
 
   const rawBody = await req.text();
@@ -121,9 +127,13 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
   const desfechos: string[] = [];
 
   for (const e of eventos) {
+    if (demo && e.kind !== "inbound_message") continue;
     // O evento chega carimbado com a WABA; se não for a desta sessão, ignoramos.
     // Confiar no `entry.id` para escolher a org seria aceitar o corpo como fonte.
-    if (session.wabaId && e.wabaId && e.wabaId !== session.wabaId) continue;
+    if (session.wabaId && e.wabaId && e.wabaId !== session.wabaId) {
+      if (demo) throw new DemoWebDenied();
+      continue;
+    }
 
     if (e.kind === "inbound_message") {
       // A metade que faltava: mensagem do contato vira linha no inbox, move lead,
@@ -134,7 +144,8 @@ export async function POST(req: NextRequest, ctx: RouteCtx): Promise<NextRespons
       // resolvia a sessão só pelo `phone_number_id` do payload — e duas
       // organizações com o mesmo número faziam a mensagem ser descartada para
       // as duas, com 200 na resposta (issue #236).
-      const r = await ingestMetaInbound(admin, e, { organizationId: session.organizationId });
+      const ingest = () => ingestMetaInbound(admin, e, { organizationId: session.organizationId });
+      const r = demo ? await withDemoWebInbound(demo, e, ingest) : await ingest();
       desfechos.push(r.status);
       if (r.status === "failed" || r.status === "no_session") {
         // 2xx continua (a Meta re-entregaria em loop), mas a falha NÃO fica muda:

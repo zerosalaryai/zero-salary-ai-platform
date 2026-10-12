@@ -1,3 +1,4 @@
+import { readDemoWebConfig, DemoWebDenied } from "./demo-web-ingress";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logger } from "@/lib/logger";
@@ -64,6 +65,7 @@ export async function marcarConversaComMensagem(
     p_at: args.at,
   } as never);
   if (!error) return;
+  if (readDemoWebConfig()) throw new DemoWebDenied();
 
   const { error: erroAviso } = await admin.rpc("emit_event" as never, {
     p_event_type: "whatsapp.conversation_mark_failed",

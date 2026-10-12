@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import {sendWithLedger,supabaseSendLedger} from "@/lib/agent-engine/edge/crm/send-ledger";
 import { randomUUID } from "node:crypto";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
@@ -46,6 +47,7 @@ export async function enviarTextoFixoPendente(
   admin: SupabaseClient,
   somenteContactIds?: string[],
 ): Promise<number> {
+  denyDemoWebAction();
   const { data: jobs, error } = await admin
     .from("job_queue")
     .select("id, organization_id, contact_id, payload, attempts, max_attempts")

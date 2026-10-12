@@ -1,3 +1,4 @@
+import { readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
 import Link from "next/link";
 
 import { LoginForm } from "@/components/auth/LoginForm";
@@ -98,7 +99,7 @@ export default async function LoginPage({
           )}
         </div>
       )}
-      <LoginForm next={next} />
+      <LoginForm next={next} demoWeb={readDemoWebConfig()} />
       <div className="space-y-2 text-center text-sm">
         <p>
           <Link

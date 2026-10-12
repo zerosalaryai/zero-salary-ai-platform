@@ -1,3 +1,5 @@
+import { denyDemoAutomation } from "@/lib/channels/demo-inbound-only";
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import { currentExecutionBoundary, guardServiceEffect } from "@/lib/atendimento/fronteira-server";
 /**
  * Camada de banco + loop do cron persistente (F3-01; achado OpenClaw 1.2). Irmão
@@ -88,6 +90,8 @@ export async function scheduleCronJob(
   tenantId: string,
   input: ScheduleCronInput,
 ): Promise<CronJobRow> {
+  denyDemoWebAction();
+  denyDemoAutomation();
   await guardServiceEffect();
   const nowMs = (input.now ?? Date.now)();
   const nextRunAt = computeInitialRunAt(input.spec, nowMs, input.staggerWindowMs, input.leadId);
@@ -274,6 +278,8 @@ async function fireOneDue(
  * um cron podre não derruba os demais). Para quando esgota os vencidos claimáveis.
  */
 export async function tickCron(pool: pg.Pool, cfg: CronTickConfig, log: Logger): Promise<CronTickResult> {
+  denyDemoWebAction();
+  denyDemoAutomation();
   const result: CronTickResult = { fired: 0, retried: 0, disabled: 0 };
   for (let i = 0; i < cfg.batchSize; i += 1) {
     const outcome = await fireOneDue(pool, cfg, log);
@@ -299,6 +305,8 @@ export async function runCronLoop(
   log: Logger,
   signal: AbortSignal,
 ): Promise<void> {
+  denyDemoWebAction();
+  denyDemoAutomation();
   while (!signal.aborted) {
     try {
       const tick = await tickCron(pool, cfg, log);

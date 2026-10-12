@@ -1,3 +1,5 @@
+import { denyDemoAutomation } from "@/lib/channels/demo-inbound-only";
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Minimal WAHA REST client used during onboarding (and elsewhere). Returns
  * `null` from `getWahaClient()` when env is not configured so callers can
@@ -186,6 +188,8 @@ export class WahaClient {
     init: RequestInit,
     tetoMs?: number,
   ): Promise<Response> {
+  denyDemoWebAction();
+    denyDemoAutomation();
     const teto = tetoMs ?? this.tetoMs;
     try {
       return await fetch(url, { ...init, signal: AbortSignal.timeout(teto) });

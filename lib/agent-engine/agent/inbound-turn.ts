@@ -1,3 +1,4 @@
+import { assertDemoOutbound, demoInboundOnly, DemoIsolationError } from '@/lib/channels/demo-inbound-only';
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
 import { TIPOS_DE_CASO, TIPOS_DE_CASO_PARA_A_IA } from "@/lib/ai/case-copy";
 import { DEFAULT_CHANNEL_PROVIDER } from '@/lib/channels/capabilities';
@@ -54,6 +55,10 @@ import { WahaChannelAdapter } from '../edge/channel/waha-adapter';
 // egress de canal — o envio em si vai pelo adapter (ChannelAdapter). Ver F2-25.
 import { applySendOutcome } from '../edge/crm/send-message';
 import {
+  loadAcceptedExternalResponse,
+  loadExternalResponseBinding,
+} from '../edge/crm/send-ledger';
+import {
   LlmBudgetExceededError,
   runModelCall,
   tool,
@@ -108,7 +113,6 @@ import {
 import { loadPlaybook } from './playbook';
 import {
   DECLARACAO_INSTRUCTION,
-  declaracaoDoTurnoSchema,
   promessasEmAberto,
   type DeclaracaoDoTurno,
 } from './declaracao';
@@ -179,6 +183,24 @@ import { camadaLigada, lerCamadasDaOrg } from '../guardrails/camadas-da-org';
 import { fusoDaOrganizacao } from './fuso-da-org';
 import { renderAgora } from '@/lib/tempo/agora';
 import { decidirElegibilidadeDaConversa } from '@/lib/ai/elegibilidade/consulta-pg';
+import {
+  detectReplyLanguage,
+  renderReplyLanguageLock,
+  type ReplyLanguageResult,
+} from './reply-language';
+import {
+  executeExternalGeneration,
+  shouldUseExternalRuntime,
+  type CustomerReplyExecutionResult,
+  type ExternalGenerationConfig,
+} from '../external/generation';
+import {
+  externalAgentTurnResponseV2Schema,
+  type ExternalAgentReplyV2,
+} from '../external/contracts';
+import { persistStructuredLeadCapture } from './structured-lead-capture';
+import { checkpointContentSchema, type CheckpointContent } from './checkpoint-content';
+export { checkpointContentSchema } from './checkpoint-content';
 
 /**
  * Superfície ESTÁTICA das tools do agente (description + inputSchema) — parte do
@@ -520,29 +542,6 @@ export async function loadInboundBodyForJob(
   return row === undefined ? null : corpoDaMensagem(row);
 }
 
-/** Conteúdo do checkpoint — o modelo devolve, o Zod valida, o Postgres guarda. */
-export const checkpointContentSchema = z.object({
-  commitments: z.array(z.string()).default([]),
-  objections: z.array(z.string()).default([]),
-  next_action: z.string().nullable().default(null),
-  rolling_summary: z.string().default(''),
-  /**
-   * A declaração do turno (spec 16 §5) — a fronteira entre FALAR e OPERAR.
-   *
-   * `.optional()` SEM default, e a diferença importa: `undefined` significa que o
-   * modelo não declarou nada (fechamento incompleto — turno a investigar), e é
-   * estado distinto de `{nada_a_declarar: true}`, que é uma avaliação registrada.
-   * Um `.default({})` aqui apagaria essa distinção e faria "o modelo esqueceu"
-   * parecer "não havia nada" — ver o cabeçalho de `declaracao.ts`.
-   *
-   * Opcional também é o que mantém a retrocompatibilidade: checkpoint gravado
-   * antes desta versão, e clone self-host cujo modelo ainda não conhece o campo,
-   * seguem validando.
-   */
-  declaracao: declaracaoDoTurnoSchema.optional(),
-});
-export type CheckpointContent = z.infer<typeof checkpointContentSchema>;
-
 /**
  * A ROW como o Postgres a devolve. `declaracao` é `Omit`-ada e redeclarada porque
  * o "não sei" tem representação DIFERENTE nas duas pontas: o modelo omite o campo
@@ -550,7 +549,8 @@ export type CheckpointContent = z.infer<typeof checkpointContentSchema>;
  * prometer `undefined` onde `select *` entrega `null` — e o `=== undefined` de
  * quem lesse a row seria falso justamente no caso que ele quer pegar.
  */
-export interface LeadCheckpointRow extends Omit<CheckpointContent, 'declaracao'> {
+export interface LeadCheckpointRow
+  extends Omit<CheckpointContent, 'declaracao' | 'captured_facts'> {
   id: string;
   seq: string;
   organization_id: string;
@@ -571,9 +571,15 @@ export interface LeadCheckpointRow extends Omit<CheckpointContent, 'declaracao'>
  */
 export const CHECKPOINT_INSTRUCTION =
   'Feche o turno AGORA. Responda SOMENTE com um JSON válido no formato ' +
-  '{"commitments": string[], "objections": string[], "next_action": string|null, "rolling_summary": string} ' +
+  '{"commitments": string[], "objections": string[], "next_action": string|null, "rolling_summary": string, ' +
+  '"captured_facts":{"explicit_name":{"value":string,"evidence":string}|null,' +
+  '"business_industry":string|null,"location":string|null,"enquiry_volume_per_day":number|null,' +
+  '"sales_team_size":number|null,"languages":string[],"needs":' +
+  '["lead_qualification"|"faq_answering"|"human_handoff"],"pricing_requested":boolean,"demo_requested":boolean}} ' +
   '— compromissos assumidos, objeções do lead, próxima ação e o resumo acumulado ' +
   'da conversa até aqui (inclua o que o resumo anterior já dizia). ' +
+  'Em `captured_facts`, extraia SOMENTE fatos afirmados nas mensagens novas e ainda sem resposta do CLIENTE; ' +
+  'não infira pelo nome do WhatsApp, histórico antigo ou texto do agente. Use null/[]/false quando ausente. ' +
   // ⚠️ O REFERENCIAL DE `next_action`, e ele não é zelo de redação.
   //
   // Este JSON é escrito no FECHO do turno: a pergunta já saiu, a resposta ainda
@@ -1205,6 +1211,8 @@ export interface InboundTurnDeps {
   llmCfg: LlmEdgeConfig;
   knobs: InboundTurnKnobs;
   log: Logger;
+  /** Stage 1B: geração externa opt-in da instalação; ausente equivale a `native`. */
+  externalAgent?: ExternalGenerationConfig;
   /** testes: registry com provider fake — produção usa o default do seam */
   registry?: ProviderRegistry;
   embed?: typeof import('@/lib/ai/embed').embedText;
@@ -1316,6 +1324,29 @@ export function decidirSeEnfileiraOperador(input: {
   return { enfileira: true, porque: 'ligado' };
 }
 
+async function latestMessagingRestoreAt(
+  db: Queryable,
+  tenantId: string,
+  contactId: string,
+): Promise<number | null> {
+  const { rows } = await db.query<{ created_at: string }>(
+    `select created_at::text as created_at
+     from api_audit_log
+     where organization_id = $1
+       and resource_type = 'contact'
+       and resource_id = $2
+       and action = 'contact.messaging_restored'
+     order by created_at desc
+     limit 1`,
+    [tenantId, contactId],
+  );
+
+  const value = rows[0]?.created_at;
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 async function insertCheckpoint(
   db: Queryable,
   input: { tenantId: string; leadId: string; jobId: string; content: CheckpointContent },
@@ -1324,7 +1355,8 @@ async function insertCheckpoint(
   const boundary = currentExecutionBoundary();
   await db.query(
     `insert into lead_checkpoints (organization_id, contact_id, job_id, commitments, objections, next_action, rolling_summary, declaracao, conversation_id, service_revision, demanda_id, demanda_revision)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     on conflict (organization_id, job_id) where job_id is not null do nothing`,
     [
       input.tenantId,
       input.leadId,
@@ -1627,6 +1659,8 @@ export interface AgentTurnInput {
   conversationId: string;
   /** Id da mensagem que criou o job inbound; não é usado por follow-ups. */
   inboundMessageId?: string;
+  /** Expõe a trava já derivada para fallbacks externos que também podem falar com o lead. */
+  onReplyLanguageDetected?: (result: ReplyLanguageResult) => void;
   /** monta a abertura APÓS o ritual de leitura (inbound vs. bloco temporal do follow-up). */
   buildOpening: (ritual: {
     previous: LeadCheckpointRow | null;
@@ -1880,6 +1914,7 @@ async function executarTurnoDoAgente(
   // turno, antes de qualquer chamada de modelo — mesmo lugar e mesmo custo do
   // veto de handoff acima.
   if (!preview) {
+    await assertDemoOutbound(tenantId, input.conversationId, liveJob().id);
     try {
       const elegib = await decidirElegibilidadeDaConversa(pool, {
         organizationId: tenantId,
@@ -1887,6 +1922,7 @@ async function executarTurnoDoAgente(
         agora: clock(),
         ttlMs: deps.knobs.allowlistTtlMs ?? ALLOWLIST_TTL_MS_PADRAO,
       });
+      if (demoInboundOnly() && elegib === null) throw new DemoIsolationError();
       if (elegib !== null && !elegib.permite) {
         runLog.info('turno pulado — conversa não elegível para IA', {
           kind: liveJob().kind,
@@ -1912,6 +1948,7 @@ async function executarTurnoDoAgente(
           });
       }
     } catch (err) {
+      if (demoInboundOnly()) throw new DemoIsolationError();
       runLog.warn('checagem de elegibilidade falhou no turno — seguindo', {
         error: (err instanceof Error ? err.message : String(err)).slice(0, 160),
       });
@@ -2007,7 +2044,7 @@ async function executarTurnoDoAgente(
         inbound: liveJob().kind === 'inbound_turn',
       }, { log: runLog });
   const agentConfig = routed.config;
-  if (!preview && agentConfig?.operationMode === 'assisted' && job?.kind === 'inbound_turn') {
+  if (!preview && agentConfig?.operationMode === "assisted" && job?.kind === 'inbound_turn') {
     const { generateReplyDraft } = await import('./reply-drafts');
     await generateReplyDraft(pool, deps, {
       organizationId: tenantId,
@@ -2021,6 +2058,12 @@ async function executarTurnoDoAgente(
   }
   if (!preview && agentConfig && (agentConfig.pausedAt || agentConfig.operationMode === 'assisted'))
     return;
+  const usesExternalRuntime = shouldUseExternalRuntime({
+    runtime: deps.externalAgent?.runtime,
+    jobKind: preview ? 'preview' : liveJob().kind,
+    hasPublishedAgent: agentConfig !== null,
+    preview: preview !== undefined,
+  });
   const agentOperation =
     !preview && agentConfig?.operationRevision
       ? {
@@ -2236,6 +2279,13 @@ async function executarTurnoDoAgente(
   // sem base legal. Resposta a inbound (isProspecting=false) não dispara o veto de base legal.
   const lgpd = openingContext.lgpd;
 
+  const mensagemDoJob =
+    currentInboundText ?? latestInboundSignal(openingContext.context.messages);
+  const inboundsPendentes = inboundsNaoRespondidos(openingContext.context.messages);
+  const mensagemMaisRecente = inboundsPendentes.at(-1) ?? mensagemDoJob;
+  const replyLanguage = detectReplyLanguage(mensagemMaisRecente);
+  input.onReplyLanguageDetected?.(replyLanguage);
+
   /** Argumentos fixos do aviso ao lead — os dois desvios abaixo só trocam o motivo. */
   const avisoDaEscalacao = () => ({
     ids: {
@@ -2253,6 +2303,7 @@ async function executarTurnoDoAgente(
       now: clock(),
       log: runLog,
       lgpd,
+      replyLanguage,
       agentId: agentConfig?.agentId ?? null,
       ...(deps.knobs.disclosureMode !== undefined
         ? { disclosureMode: deps.knobs.disclosureMode }
@@ -2280,9 +2331,6 @@ async function executarTurnoDoAgente(
   //    Handoff, opt-out e urgência leem daqui: são coisas que não podem passar
   //    despercebidas só porque chegaram na segunda mensagem de uma rajada, que o
   //    drain coalesce no job da primeira.
-  const mensagemDoJob =
-    currentInboundText ?? latestInboundSignal(openingContext.context.messages);
-  const inboundsPendentes = inboundsNaoRespondidos(openingContext.context.messages);
   if (
     !preview &&
     inboundsPendentes.some(
@@ -2368,7 +2416,7 @@ async function executarTurnoDoAgente(
   // summary DURÁVEL segue vindo do checkpoint de fechamento; aqui ele só alimenta o prompt.
   let effectivePrevious = previous;
   let effectiveContext = openingContext.context;
-  if (deps.knobs.compaction !== undefined) {
+  if (!usesExternalRuntime && deps.knobs.compaction !== undefined) {
     const compacted = await maybeCompact(
       pool,
       deps.llmCfg,
@@ -2469,6 +2517,7 @@ async function executarTurnoDoAgente(
 
   // Estado do RUN — vive só neste closure (isolamento por construção, acc 3).
   let seq = 0;
+  let acceptedExternalResponseForNextSend: ExternalAgentReplyV2 | null | undefined;
   // Teto de mensagens físicas por turno (F2-15b) — `seq` JÁ é a contagem certa: ele só
   // avança quando o envio de fato sai pro canal (send_message + send_template, bolhas
   // incluídas), nunca em veto de gate. Checar `seq` antes de tentar o próximo envio
@@ -2484,7 +2533,7 @@ async function executarTurnoDoAgente(
   // Gate 5 da cadeia (F4-02/F4-08): closure do classificador semântico com tenant/lead/job da
   // ROW do job fechados dentro (regra dura nº 1) — resolvido pelo seam agnóstico. undefined =
   // camada off (gate no-op). CUSTO: uma chamada de modelo POR ENVIO quando ligada.
-  const semanticClassifier = camadaLigada(
+  const semanticClassifier = !usesExternalRuntime && camadaLigada(
     camadas.promessa_semantica,
     deps.knobs.promiseSemantic?.enabled === true,
   )
@@ -2908,6 +2957,7 @@ async function executarTurnoDoAgente(
             jobId: liveJob().id,
             channelSessionId: input.channelSessionId,
             body,
+            replyLanguage,
             optedOutThisTurn,
             // ponytail: channel_sessions.daily_message_limit do CRM ainda não é lido
             // no runtime — null cai nos degraus de warm-up (conservadores). Injetar
@@ -3000,8 +3050,14 @@ async function executarTurnoDoAgente(
             },
             // `finalBody` = corpo após a cadeia (o disclosureGate F4-05 pode prependar o
             // disclosure via inject); é ELE que vai ao canal, não o `body` capturado da tool.
-            send: (finalBody: string) =>
-              sendInBubbles(finalBody, {
+            send: (finalBody: string) => {
+              const bubbles = splitForSend(
+                finalBody,
+                agentConfig?.splitMessages ?? false,
+                agentConfig?.splitMaxChars ?? 600,
+              );
+              let bubbleIndex = 0;
+              return sendInBubbles(finalBody, {
                 enabled: agentConfig?.splitMessages ?? false,
                 maxChars: agentConfig?.splitMaxChars ?? 600,
                 sleep: deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
@@ -3010,6 +3066,7 @@ async function executarTurnoDoAgente(
                 // `esperaForaDoLock` (paga antes de o guardrail tomar o lock do número) —
                 // issue #654. Neste ponto fica só o jitter anti-ban entre bolhas.
                 send: (bubble): Promise<ChannelSendResult> => {
+                  bubbleIndex += 1;
                   seq += 1;
                   return liveChannel().send({
                     tenantId,
@@ -3020,9 +3077,14 @@ async function executarTurnoDoAgente(
                     seq,
                     conversationId: input.conversationId,
                     body: bubble,
+                    ...(bubbleIndex === Math.max(bubbles.length, 1) &&
+                    acceptedExternalResponseForNextSend !== undefined
+                      ? { acceptedResponse: acceptedExternalResponseForNextSend }
+                      : {}),
                   });
                 },
-              }),
+              });
+            },
           };
           let chain = await runBeforeSend(beforeSendArgs);
           if (chain.status === 'vetoed' && chain.code === 'case_promise_without_case') {
@@ -3083,7 +3145,10 @@ async function executarTurnoDoAgente(
             // categoria do vazamento) e atividade na timeline: a liberação não apaga a
             // medição, que é o produto deste gate.
             internalVocabularyVetoCount += 1;
-            if (internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO) {
+            if (
+              internalVocabularyVetoCount < MAX_VETOS_DE_VOCABULARIO_INTERNO ||
+              usesExternalRuntime
+            ) {
               return { ok: false, error: { code: chain.code, message: chain.message } };
             }
             runLog.warn(
@@ -3397,7 +3462,7 @@ async function executarTurnoDoAgente(
   // vêm da ROW do job (closure), nunca do payload do modelo. É MUTANTE (cria
   // cron_job), por isso fica fora de READ_ONLY_TOOLS.
   const followupKnobs = deps.knobs.followup;
-  if (followupKnobs !== undefined) {
+  if (!demoInboundOnly() && followupKnobs !== undefined) {
     rawTools.schedule_followup = tool({
       ...AGENT_TOOL_DEFS.schedule_followup,
       execute: async (raw) => {
@@ -3598,7 +3663,7 @@ async function executarTurnoDoAgente(
   // ver edge/crm/mcp-tools.ts). As 8 tools do engine têm precedência de nome.
   let mcpCleanup: (() => Promise<void>) | null = null;
   try {
-    if (agentConfig !== null && agentConfig.toolIds.length > 0) {
+    if (!demoInboundOnly() && agentConfig !== null && agentConfig.toolIds.length > 0) {
       try {
         // As de OPERAÇÃO saem antes de serem montadas, quando o Operador as tem.
         // Medido: são elas que carregavam 2 dos 3 vazamentos (o DADO que devolvem),
@@ -3752,7 +3817,7 @@ async function executarTurnoDoAgente(
     // guardrail depende de ordem entre os dois, e o `jailbreak` segue sem vetar
     // o inbound — só flagra o turno no trace.
     const [stageResultado, jailbreakVerdict] = await Promise.all([
-      deps.knobs.stageClassifier !== undefined
+      !usesExternalRuntime && deps.knobs.stageClassifier !== undefined
         ? classifyStage(
             pool,
             deps.llmCfg,
@@ -3769,7 +3834,7 @@ async function executarTurnoDoAgente(
       // skillSignal já é a última inbound). Roda pelo seam agnóstico (modelo BARATO, budget
       // checado nele). NÃO veta o inbound — só FLAGRA o turno no trace; flag/level não são PII
       // (a mensagem/reason nunca vão a log). A correlação com promessa fora de tabela escala no fim.
-      camadaLigada(camadas.jailbreak, deps.knobs.jailbreak !== undefined)
+      !usesExternalRuntime && camadaLigada(camadas.jailbreak, deps.knobs.jailbreak !== undefined)
         ? classifyJailbreak(
             pool,
             deps.llmCfg,
@@ -3888,6 +3953,224 @@ async function executarTurnoDoAgente(
       nativeParts.length === 0
         ? openingTextOnly
         : [{ role: 'user', content: [{ type: 'text', text: openingText }, ...nativeParts] }];
+
+    const replyLanguageInstructions = renderReplyLanguageLock(replyLanguage);
+
+    if (usesExternalRuntime) {
+      if (agentConfig === null) throw new Error('external_runtime_without_published_agent');
+      const publishedAgent = agentConfig;
+      const sendMessageTool = rawTools.send_message as unknown as {
+        execute?: (input: { body: string }) => Promise<CustomerReplyExecutionResult>;
+      };
+      if (sendMessageTool.execute === undefined) {
+        throw new Error('external_runtime_customer_reply_executor_missing');
+      }
+
+      const messagingRestoreAt =
+        preview === undefined ? await latestMessagingRestoreAt(pool, tenantId, leadId) : null;
+      const externalHistory =
+        messagingRestoreAt === null
+          ? effectiveContext.messages
+          : effectiveContext.messages.filter((message) => {
+              const sentAt = Date.parse(message.sent_at);
+              return Number.isFinite(sentAt) && sentAt > messagingRestoreAt;
+            });
+      const externalPreviousSummary =
+        messagingRestoreAt === null ? (effectivePrevious?.rolling_summary ?? null) : null;
+
+      if (messagingRestoreAt !== null) {
+        runLog.info('contexto externo cortado no último reconsentimento', {
+          history_before: effectiveContext.messages.length,
+          history_after: externalHistory.length,
+          previous_summary_cleared: true,
+        });
+      }
+
+      let externalHandoffApplied = false;
+      const handoffFromExternal = async (reason: string): Promise<void> => {
+        if (externalHandoffApplied) return;
+        const aviso = await avisarLeadDaEscalacao(pool, avisoDaEscalacao().ids, {
+          ...avisoDaEscalacao().base,
+          motivo: 'outro',
+        });
+        await performHumanHandoff(
+          pool,
+          { tenantId, leadId, conversationId: input.conversationId },
+          {
+            reason: reason.slice(0, 200),
+            conversationSummary: buildHandoffSummary(effectivePrevious),
+            inboxTitle: 'Runtime externo pediu intervenção humana — assumir a conversa',
+            avisoAoLead: aviso,
+            log: runLog,
+          },
+        );
+        externalHandoffApplied = true;
+        moverParaHandoffBestEffort('external_runtime');
+      };
+
+      runLog.info('runtime externo selecionado para o agente publicado', {
+        external_runtime: 'python',
+        request_id: liveJob().id,
+        agent_id: publishedAgent.agentId,
+        agent_version_id: publishedAgent.versionId,
+      });
+
+      const parseAcceptedResponse = (raw: unknown): ExternalAgentReplyV2 => {
+        const parsed = externalAgentTurnResponseV2Schema.safeParse(raw);
+        if (!parsed.success || parsed.data.status !== 'reply') {
+          throw new Error('external_accepted_response_invalid');
+        }
+        return parsed.data;
+      };
+
+      const storedBinding = await loadExternalResponseBinding(pool, {
+        tenantId,
+        jobId: liveJob().id,
+      });
+      if (storedBinding?.kind === "pending") {
+        throw new Error('external_response_delivery_pending');
+      }
+      const storedResponse =
+        storedBinding?.kind === 'accepted' ? storedBinding.response : null;
+      const recoveredAcceptedResponse =
+        storedResponse === null ? null : parseAcceptedResponse(storedResponse);
+      const recoveredV1Delivery =
+        storedBinding?.kind === 'accepted' && storedBinding.response === null;
+
+      const externalOutcome = recoveredV1Delivery
+        ? { kind: 'reply_processed' as const, traceId: liveJob().id }
+        : recoveredAcceptedResponse !== null
+          ? {
+              kind: 'reply_processed' as const,
+              traceId: recoveredAcceptedResponse.trace_id,
+              acceptedResponse: recoveredAcceptedResponse,
+            }
+          : await executeExternalGeneration({
+              config: deps.externalAgent!,
+              log: runLog,
+              source: {
+                requestId: liveJob().id,
+                organizationId: tenantId,
+                channelSessionId: input.channelSessionId,
+                conversationId: input.conversationId,
+                contactId: leadId,
+                agentId: publishedAgent.agentId,
+                agentVersionId: publishedAgent.versionId,
+                instructions: `${system}\n\n${replyLanguageInstructions}`,
+                messageId: input.inboundMessageId!,
+                messageText: mensagemMaisRecente,
+                replyLanguage: replyLanguage.language,
+                history: externalHistory,
+                contact: {
+                  name: effectiveContext.contact.name,
+                  tags: effectiveContext.contact.tags,
+                },
+                lead: {
+                  stage: leadState?.stage ?? null,
+                  nextAction: leadState?.next_action ?? null,
+                },
+                previousSummary: externalPreviousSummary,
+              },
+              sendReply: async (text, acceptedResponse) => {
+                acceptedExternalResponseForNextSend = acceptedResponse ?? null;
+                try {
+                  return await sendMessageTool.execute!({ body: text });
+                } finally {
+                  acceptedExternalResponseForNextSend = undefined;
+                }
+              },
+              handoff: handoffFromExternal,
+            });
+
+      if (runError !== null) throw runError;
+      if (outcomes.some((outcome) => outcome.kind === 'failed')) {
+        throw new Error('envio marcado como failed pelo CRM — run re-tentado pela fila');
+      }
+      const queued = outcomes.find((outcome) => outcome.kind === "queued");
+      if (queued !== undefined) {
+        await applySendOutcome(
+          pool,
+          {
+            kind: 'queued',
+            idempotencyKey: queued.idempotencyKey,
+            crmMessageId: queued.messageId,
+          },
+          {
+            jobId: liveJob().id,
+            workerId: ctx.workerId,
+            tenantId,
+            leadId,
+            jobClaim: claimOfJob(liveJob()),
+          },
+          { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
+        );
+        throw new JobSettledError('entrega externa ainda em voo — turno reagendado');
+      }
+      const blocked = outcomes.find((outcome) => outcome.kind === 'blocked');
+      if (blocked !== undefined) {
+        await applySendOutcome(
+          pool,
+          blocked,
+          {
+            jobId: liveJob().id,
+            workerId: ctx.workerId,
+            tenantId,
+            leadId,
+            jobClaim: claimOfJob(liveJob()),
+          },
+          { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
+        );
+        throw new JobSettledError('runtime externo encerrado com veto permanente do sink');
+      }
+      if (pacingCapVeto !== null && outcomes.length === 0) {
+        const veto = pacingCapVeto as { code: string; nextAllowedAt: Date };
+        await rescheduleJob(pool, liveJob().id, ctx.workerId, {
+          acquiredAt: claimOfJob(liveJob())?.acquired_at,
+          delayMs: Math.max(veto.nextAllowedAt.getTime() - clock().getTime(), 1_000),
+          reason: `cap de envio (${veto.code}) atingido — turno externo adiado`,
+        });
+        throw new JobSettledError('cap de envio atingido — turno externo reagendado');
+      }
+
+      if (externalOutcome.kind === 'reply_processed') {
+        const acceptedRaw = await loadAcceptedExternalResponse(pool, {
+          tenantId,
+          jobId: liveJob().id,
+        });
+        if (acceptedRaw === null && externalOutcome.acceptedResponse !== undefined) {
+          const deliveryAccepted = outcomes.some(
+            (outcome) => outcome.kind === 'sent' || outcome.kind === 'already_sent',
+          );
+          if (deliveryAccepted) throw new Error('external_accepted_response_not_bound');
+        }
+        if (acceptedRaw !== null) {
+          const accepted = parseAcceptedResponse(acceptedRaw);
+          const content = checkpointContentSchema.parse(accepted.checkpoint);
+          await insertCheckpoint(pool, {
+            tenantId,
+            leadId,
+            jobId: liveJob().id,
+            content,
+          });
+          await persistStructuredLeadCapture({
+            pool,
+            supabase: deps.crmCfg.supabase,
+            organizationId: tenantId,
+            contactId: leadId,
+            jobId: liveJob().id,
+            agentId: publishedAgent.agentId,
+            customerMessages: inboundsPendentes.length > 0 ? inboundsPendentes : [mensagemDoJob],
+            facts: content.captured_facts,
+          });
+        }
+      }
+      runLog.info('turno externo concluído pelo caminho canônico do CRM', {
+        kind: liveJob().kind,
+        external_outcome: externalOutcome.kind,
+        messages_sent: outcomes.length,
+      });
+      return;
+    }
 
     // O modelo decide tools livremente dentro do teto de steps (knob AGENT_MAX_STEPS).
     //
@@ -4040,7 +4323,7 @@ async function executarTurnoDoAgente(
     // não gera um segundo Operador para o mesmo turno.
     const disparo = decidirSeEnfileiraOperador({
       temAgentePublicado: agentConfig !== null,
-      papelLigado: agentConfig?.operatorEnabled ?? false,
+      papelLigado: !demoInboundOnly() && (agentConfig?.operatorEnabled ?? false),
     });
     if (!disparo.enfileira) {
       runLog.info('turno do operador não enfileirado', { porque: disparo.porque });
@@ -4251,7 +4534,7 @@ async function executarTurnoDoAgente(
       // Capturado num `const`: `pacingCapVeto` é reatribuído numa closure em outro ponto do
       // turno, e o TS reabre a união (perde o `!== null`) depois de qualquer chamada — o
       // valor JÁ CHECADO não muda, só a inferência precisa de um nome que não reatribui.
-      const veto = pacingCapVeto;
+      const veto = pacingCapVeto as { code: string; nextAllowedAt: Date };
       await rescheduleJob(pool, liveJob().id, ctx.workerId, {
         acquiredAt: claimOfJob(liveJob())?.acquired_at,
         delayMs: Math.max(veto.nextAllowedAt.getTime() - clock().getTime(), 1_000),
@@ -4351,6 +4634,7 @@ export async function runAgentPreview(
 export function createInboundTurnHandler(deps: InboundTurnDeps) {
   return async (job: JobRow, pool: pg.Pool, ctx: { workerId: string }): Promise<void> => {
     const payload = inboundTurnPayloadSchema.parse(job.payload);
+    await assertDemoOutbound(job.organization_id, payload.conversation_id, job.id);
     if (!job.contact_id) throw new Error('reply_without_contact');
     const resolvedAgent = await resolveConversationTurn(pool, deps.llmCfg, {
       tenantId: job.organization_id,
@@ -4390,6 +4674,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           agora: new Date(),
           ttlMs: deps.knobs.allowlistTtlMs ?? ALLOWLIST_TTL_MS_PADRAO,
         });
+        if (demoInboundOnly() && elegib === null) throw new DemoIsolationError();
         if (elegib !== null && !elegib.permite) {
           deps.log.info('rascunho pulado — conversa não elegível para IA', {
             job_id: job.id,
@@ -4399,6 +4684,7 @@ export function createInboundTurnHandler(deps: InboundTurnDeps) {
           return;
         }
       } catch (err) {
+        if (demoInboundOnly()) throw new DemoIsolationError();
         // Degrada ABERTO, igual ao gêmeo de `runAgentTurn`: falha da consulta
         // não pode calar um assistido cuja conversa está liberada. Quem barra
         // de verdade — handoff — já rodou acima e falha fechado.

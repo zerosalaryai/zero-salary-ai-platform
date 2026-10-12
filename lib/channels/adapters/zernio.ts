@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { denyDemoAutomation } from "../demo-inbound-only";
 /**
  * Adapter do canal intermediado — o transporte de um BSP.
  *
@@ -162,6 +164,8 @@ export const zernioAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+  denyDemoWebAction();
+    denyDemoAutomation();
     if (envelope.kind === "contact") {
       throw new Error("zernio_contact_not_supported: envio de cartão de contato não suportado neste canal.");
     }
@@ -255,6 +259,8 @@ export const zernioAdapter: ChannelAdapter = {
     language: string;
     values: Record<string, string>;
   }): Promise<{ externalId: string | null }> {
+  denyDemoWebAction();
+    denyDemoAutomation();
     const admin = createAdminClient();
     const creds = await resolveZernioCreds(admin, {
       organizationId: input.organizationId,

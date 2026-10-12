@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Relógio do pipeline webhook → automação → follow-up → 1º envio.
  *
@@ -67,6 +68,7 @@ async function tickAtivosDoContato(
   statuses: ReadonlyArray<"active" | "waiting_reply"> = ["active"],
   opts?: { mesmoAntesDoPrazo?: boolean },
 ): Promise<number> {
+  denyDemoWebAction();
   const ids = await idsDoContatoEGemeos(admin, contato.organizationId, contato.contactId);
   let q = admin
     .from("followup_enrollments")
@@ -131,6 +133,7 @@ export async function acelerarPipelineDeEventos(
   admin: SupabaseClient,
   inbound?: SinalDeInbound,
 ): Promise<void> {
+  denyDemoWebAction();
   try {
     if (inbound) {
       try {
@@ -183,6 +186,7 @@ export async function kickLocalPipeline(
   admin: SupabaseClient,
   contato?: ContatoDoPipeline,
 ): Promise<void> {
+  denyDemoWebAction();
   // acelerarPipelineDeEventos já é fail-soft; o tick do contato NÃO era —
   // uma query incompleta (mock de teste ou PostgREST momentâneo) derrubava o
   // 200 da captação depois do lead já gravado. O contrato do cabeçalho vale

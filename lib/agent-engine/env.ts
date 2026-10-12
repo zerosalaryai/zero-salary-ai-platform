@@ -13,6 +13,9 @@ import {
 } from '@/lib/followup/janela';
 
 const envSchema = z.object({
+  // Isolamento local do worker: opt-in estrito; UUID completo validado no boot.
+  DEMO_INBOUND_ONLY: z.enum(['true', 'false']).default('false'),
+  DEMO_CHANNEL_ID: z.string().optional(),
   // Postgres do Supabase (connection string — Settings → Database). O motor usa
   // `pg` direto: FOR UPDATE SKIP LOCKED, advisory locks, FTS.
   SUPABASE_DB_URL: z.string().url(),
@@ -90,6 +93,12 @@ const envSchema = z.object({
   // 'engine' (default) = o drain deste worker consome; 'native' = o dispatcher
   // EPIC-13 consome e o drain daqui NÃO liga. Nunca os dois.
   AGENT_DISPATCH_CONSUMER: z.enum(['engine', 'native']).default('engine'),
+  // Stage 1B: troca somente a geração principal do agente publicado. Ausente =
+  // runtime nativo byte-a-byte; URL/segredo só são exigidos quando o modo python
+  // efetivamente tenta uma chamada, para um `.env` antigo continuar subindo.
+  ZSAI_AGENT_RUNTIME: z.enum(['native', 'python']).default('native'),
+  ZSAI_PYTHON_AGENT_URL: z.string().url().optional(),
+  ZSAI_INTERNAL_AGENT_SECRET: z.string().min(1).optional(),
   // Kill switch do teto de gasto de IA. `on` (ausente = on) não liga nada:
   // respeita o que cada organização escolheu. A chave só AFROUXA — 'avisar'
   // rebaixa bloqueio a aviso, 'off' (e as grafias falsas comuns) cala tudo.

@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { demoInboundOnly } from "@/lib/channels/demo-inbound-only";
 /**
  * "digitando…" — a metade do atraso humano que é do CANAL.
  *
@@ -67,6 +69,8 @@ export async function sinalizarDigitando(
   supabase: SupabaseClient,
   input: SinalizarDigitandoInput,
 ): Promise<void> {
+  denyDemoWebAction();
+  if (demoInboundOnly()) return; // nenhum sinal automático fora da resposta inbound
   const { data } = await supabase
     .from("conversations")
     .select(

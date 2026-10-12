@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { assertDemoTransport } from "../demo-inbound-only";
 /**
  * Adapter da WhatsApp Cloud API — o transporte do canal oficial.
  *
@@ -264,6 +266,8 @@ export const metaCloudAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+  denyDemoWebAction();
+    await assertDemoTransport(envelope);
     // Sessão primeiro, env como fallback. O `sessionRef` do canal oficial É o
     // `phone_number_id` (ver `resolveSessionRef`), então ele é a chave da busca.
     const creds = await resolveMetaCreds(createAdminClient(), {
@@ -287,6 +291,7 @@ export const metaCloudAdapter: ChannelAdapter = {
       { type: "text", text: { body: envelope.body ?? "" } };
 
     await envelope.beforeSend?.();
+    await assertDemoTransport({ ...envelope, sessionRef: creds.phoneNumberId });
     const res = await fetch(
       `https://graph.facebook.com/${creds.graphVersion}/${creds.phoneNumberId}/messages`,
       {

@@ -217,6 +217,11 @@ const schema = z.object({
   // agent-dispatcher vira no-op mecânico); 'native' = o dispatcher EPIC-13
   // consome (deploy sem worker). NUNCA os dois — dois consumidores = turno
   // duplicado ou perdido (bug real da fusão).
+  // Isolamento local do worker: opt-in estrito; UUID completo validado no boot.
+  DEMO_WEB_INGRESS_ONLY: z.enum(["true", "false"]).default("false"),
+  DEMO_WEB_CHANNEL_ID: z.string().optional(),
+  DEMO_INBOUND_ONLY: z.enum(['true', 'false']).default('false'),
+  DEMO_CHANNEL_ID: z.string().optional(),
   AGENT_DISPATCH_CONSUMER: z.enum(["engine", "native"]).optional().default("engine"),
 
   /**

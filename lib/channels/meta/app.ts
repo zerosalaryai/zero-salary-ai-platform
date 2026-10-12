@@ -35,16 +35,18 @@
  * exatamente a falha SILENCIOSA que a issue #850 mediu, agora difícil de ver
  * porque metade da configuração parece certa.
  *
- * ─── Nunca lança ────────────────────────────────────────────────────────────
+ * ─── Nunca lança fora do demo web ────────────────────────────────────────────
  *
  * Esta função é chamada a CADA entrega da Meta. Um throw aqui é 500 no webhook,
  * e a Meta reentrega em backoff um evento que nunca vai melhorar. Toda falha de
- * leitura degrada para o ambiente, e o motivo vai ao log.
+ * leitura degrada para o ambiente, e o motivo vai ao log. No demo web a leitura
+ * é estrita, sem memo/fallback, e qualquer falha lança um erro genérico.
  */
 
 import { logger } from "@/lib/logger";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
+import { DemoWebDenied, readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
 
 /** O que a instalação tem em vigor. Campo nulo = não configurado nessa fonte. */
 export interface AppDaMetaEmVigor {
@@ -155,14 +157,45 @@ async function parDoBanco(linha: LinhaDoApp | null): Promise<AppDaMetaEmVigor | 
   return { appSecret, verifyToken };
 }
 
+/** Demo: singleton confiável, par completo, sem memo nem piso do ambiente.
+ * A sessão/tenant/WABA/transporte são vinculados pela rota antes desta leitura.
+ * O schema atual não guarda app_id nem uma associação app→WABA: essa evidência
+ * ainda é requisito operacional antes de habilitar tráfego ao vivo.
+ */
+async function appDaMetaEstrito(): Promise<AppDaMetaEmVigor> {
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("platform_meta_app")
+      .select("id, app_secret_encrypted, verify_token_encrypted")
+      .eq("id", 1)
+      .limit(2);
+    if (error || !Array.isArray(data) || data.length !== 1 || data[0]?.id !== 1)
+      throw new DemoWebDenied();
+    const linha = data[0];
+    const segredoCifrado = texto(linha.app_secret_encrypted);
+    const tokenCifrado = texto(linha.verify_token_encrypted);
+    if (!segredoCifrado || !tokenCifrado) throw new DemoWebDenied();
+    const appSecret = texto(await decryptWebhookSecret(admin, segredoCifrado));
+    const verifyToken = texto(await decryptWebhookSecret(admin, tokenCifrado));
+    if (!appSecret || !verifyToken) throw new DemoWebDenied();
+    return { appSecret, verifyToken };
+  } catch {
+    // Nunca expõe erros do banco/RPC, cifras ou credenciais ao caller/log.
+    throw new DemoWebDenied();
+  }
+}
+
 /**
- * A configuração em vigor — banco primeiro, `.env` como piso. Nunca lança.
+ * A configuração em vigor — banco primeiro, `.env` como piso fora do demo.
+ * No demo web lança em qualquer incerteza, antes de ler o memo/fallback.
  *
  * Devolve os dois campos possivelmente nulos (instalação sem app configurado):
  * é o estado real de um deploy novo, e quem chama decide — a rota responde 403
  * no handshake e 401 na entrega, que é o desfecho de hoje.
  */
 export async function appDaMeta(): Promise<AppDaMetaEmVigor> {
+  if (readDemoWebConfig()) return appDaMetaEstrito();
   const memo = globalThis.__memoDoAppDaMeta;
   if (memo && memo.expiraEm > Date.now()) return memo.valor;
 

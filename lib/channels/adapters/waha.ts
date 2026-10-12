@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { denyDemoAutomation } from "../demo-inbound-only";
 /**
  * Adapter WAHA — o primeiro `ChannelAdapter`, e de propósito o mais burro
  * possível: cada método delega ao `lib/waha/*` que já existe e já é testado.
@@ -117,6 +119,8 @@ export const wahaAdapter: ChannelAdapter = {
    * parar por causa de um indicador decorativo.
    */
   async signalTyping(input: { sessionRef: string; recipient: string }): Promise<void> {
+  denyDemoWebAction();
+    denyDemoAutomation();
     const client = getWahaClient();
     if (!client) return;
     await client.setPresence(input.sessionRef, input.recipient, "typing");
@@ -189,6 +193,8 @@ export const wahaAdapter: ChannelAdapter = {
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
+  denyDemoWebAction();
+    denyDemoAutomation();
     const client = getWahaClient();
     // Sem env de WAHA o comportamento atual é NOOP, não erro: a UI mostra o
     // banner de "container não está no ar". Transformar em exceção mudaria o

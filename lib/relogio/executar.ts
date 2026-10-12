@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import { recoverStuckMessages } from "@/app/api/v1/cron/recover-stuck-messages/route";
 import { idsDoContatoEGemeos } from "@/lib/channels/contato-por-telefone";
 import { drainEventLog } from "@/lib/event-log/drain";
@@ -81,6 +82,7 @@ export async function executarTickDoRelogio(): Promise<{
   tarefas: ResultadoDeTarefa[];
   mexeu: boolean;
 }> {
+  denyDemoWebAction();
   const admin = createAdminClient();
   const tarefas: ResultadoDeTarefa[] = [];
   let mexeu = false;

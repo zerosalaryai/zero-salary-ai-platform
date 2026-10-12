@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Fila durável no Postgres do harness — FOR UPDATE SKIP LOCKED com lane por contact_id
  * (F2-03; stack.md §3, blueprint 8.6). Primitivas puras: enqueue, claim, complete,
@@ -15,6 +16,7 @@
  * módulo direto no Node 22 (type stripping), que não resolve especificador .js→.ts.
  */
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { assertDemoClaimBinding, type DemoBinding } from '@/lib/channels/demo-inbound-only';
 
 export type JobKind =
   | 'inbound_turn'
@@ -116,6 +118,7 @@ export async function enqueueJob(
 }
 
 export interface ClaimOptions {
+  demo?: DemoBinding;
   workerId: string;
   /** Cap GLOBAL de jobs 'running' simultâneos — knob QUEUE_MAX_CONCURRENCY (env.ts), nunca constante. */
   maxConcurrency: number;
@@ -213,7 +216,32 @@ export async function faltaParaOProximoJob(pool: Pool): Promise<number | null> {
   return rows[0]?.falta_ms ?? null;
 }
 
+// Filtro ANTES do lock/update: nenhum job de outro canal ou antigo é adquirido/alterado.
+const DEMO_JOB_SCOPE_SQL = `
+      and j.kind='inbound_turn' and j.organization_id=$4
+      and j.created_at >= $5::timestamptz
+      and exists (
+        select 1 from conversations cv
+        join channel_sessions cs on cs.id=cv.channel_session_id and cs.organization_id=cv.organization_id
+        join contacts ct on ct.id=cv.contact_id and ct.organization_id=cv.organization_id
+        join messages m on m.id::text=j.payload->>'inbound_message_id'
+          and m.organization_id=cv.organization_id and m.conversation_id=cv.id
+          and m.contact_id=ct.id and m.channel_session_id=cs.id and m.direction='inbound'
+        join event_log e on e.id=j.source_event_id and e.organization_id=j.organization_id
+        where cv.id::text=j.payload->>'conversation_id' and cv.organization_id=j.organization_id
+          and cv.contact_id=j.contact_id and cs.id=$3 and cs.archived_at is null
+          and cs.metadata->>'ai_gate'='open'
+          and j.payload->>'channel_session_id'=cs.id::text and j.payload->>'contact_id'=ct.id::text
+          and e.event_type='ai_agent.dispatch_requested' and e.created_at >= $5::timestamptz
+          and m.created_at >= $5::timestamptz and coalesce(m.sent_at,m.created_at) >= $5::timestamptz
+          and e.payload->>'inbound_message_id'=m.id::text
+          and e.payload->>'conversation_id'=cv.id::text and e.payload->>'contact_id'=ct.id::text
+          and e.payload->>'channel_session_id'=cs.id::text
+      )`;
+
 export async function claimJobs(pool: Pool, opts: ClaimOptions): Promise<JobRow[]> {
+  denyDemoWebAction();
+  assertDemoClaimBinding(opts.demo);
   const client = await pool.connect();
   try {
     await client.query('begin');
@@ -229,7 +257,13 @@ export async function claimJobs(pool: Pool, opts: ClaimOptions): Promise<JobRow[
       await client.query('rollback');
       return [];
     }
-    const { rows } = await client.query<JobRow>(CLAIM_SQL, [free, opts.workerId]);
+    const sql = opts.demo ? CLAIM_SQL.replace(
+      "where j.status = 'pending' and j.run_after <= now()",
+      "where j.status = 'pending' and j.run_after <= now()" + DEMO_JOB_SCOPE_SQL,
+    ) : CLAIM_SQL;
+    const values: unknown[] = [free, opts.workerId];
+    if (opts.demo) values.push(opts.demo.channelId, opts.demo.organizationId, opts.demo.startedAt);
+    const { rows } = await client.query<JobRow>(sql, values);
     await client.query('commit');
     return rows;
   } catch (err) {

@@ -17,6 +17,7 @@
  * propósito: mudar só a variável em teste.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as ConsultaPg from '@/lib/ai/elegibilidade/consulta-pg';
 import type { PublishedAgentConfig } from '@/lib/agent-engine/agent/agent-config';
 
 const mocks = vi.hoisted(() => ({
@@ -48,7 +49,7 @@ vi.mock('@/lib/agent-engine/pacing/aviso-de-janela', () => ({
   resolverAvisoDeJanela: vi.fn(async () => 0), avisarJanelaFechada: vi.fn(),
 }));
 
-import { createInboundTurnHandler, type InboundTurnDeps } from '@/lib/agent-engine/agent/inbound-turn';
+import { createInboundTurnHandler, runAgentTurn, type InboundTurnDeps } from '@/lib/agent-engine/agent/inbound-turn';
 
 const ids = {
   org: '11000000-0000-4000-8000-000000000001', contact: '11000000-0000-4000-8000-000000000002',
@@ -73,7 +74,7 @@ function pool() {
   mocks.byId.mockResolvedValue(assistido);
   mocks.bySession.mockResolvedValue(assistido);
   mocks.conversationAgent.mockResolvedValue(assistido);
-  return { query: vi.fn(async () => ({ rows: [{ active_ai_agent_id: null, active_intent: null, body: 'oi' }] })) };
+  return { query: vi.fn(async (_sql: string) => ({ rows: [{ active_ai_agent_id: null, active_intent: null, body: 'oi' }] })) };
 }
 
 beforeEach(() => {
@@ -122,5 +123,81 @@ describe('o assistido não rascunha em conversa que já tem dono', () => {
     const p = pool();
     await createInboundTurnHandler(deps)(job as never, p as never, { workerId: 'worker' });
     expect(mocks.draft).toHaveBeenCalledOnce();
+  });
+});
+
+// Integra a leitura pg REAL e a regra pura com as duas entradas do inbound.
+describe('Stage 1 — trava explícita do canal no inbound', () => {
+  it.each(['off', 'unknown', 'open'])("metadata.ai_gate=%s", async aiGate => {
+    const real = await vi.importActual<typeof ConsultaPg>(
+      '@/lib/ai/elegibilidade/consulta-pg',
+    );
+    mocks.elegibilidade.mockImplementation(real.decidirElegibilidadeDaConversa);
+    const p = pool();
+    const query = p.query.getMockImplementation()!;
+    p.query.mockImplementation(async (...args) => {
+      const [sql] = args;
+      if (sql.includes('channel_metadata')) return { rows: [{
+        channel_metadata: { ai_gate: aiGate, ai_gate_mode: 'pre_go_live',
+          ai_test_phone_numbers: ['+5511999990230'] },
+        force_human: false, assignee_kind: 'ai', bot_silenced_until: null,
+        ai_authorized_at: new Date().toISOString(), phone_number: '+5511999990230',
+      }] } as never;
+      return query(...args);
+    });
+    await createInboundTurnHandler(deps)(job as never, p as never, { workerId: 'worker' });
+    expect(mocks.draft).toHaveBeenCalledTimes(aiGate === 'open' ? 1 : 0);
+    if (aiGate !== 'open') {
+      await runAgentTurn(deps, job as never, p as never, { workerId: 'worker' }, {
+        conversationId: ids.conversation, channelSessionId: ids.channel,
+      } as never);
+      expect(deps.log.info).toHaveBeenCalledWith(
+        'turno pulado — conversa não elegível para IA',
+        expect.objectContaining({ motivo: 'gate_desligado' }),
+      );
+      expect(mocks.draft).not.toHaveBeenCalled();
+    }
+  });
+});
+
+// Demo: testa os catches reais sem iniciar worker, rede ou banco.
+describe('Stage 2B — erros de elegibilidade falham fechado só no demo', () => {
+  it.each([
+    { assisted: false, missing: false }, { assisted: true, missing: false },
+    { assisted: false, missing: true }, { assisted: true, missing: true },
+  ])('assisted=$assisted, resposta ausente=$missing', async ({ assisted, missing }) => {
+    const { withDemoInbound, DemoIsolationError } = await import('@/lib/channels/demo-inbound-only');
+    const channelId = 'c67e9f8a-0000-4000-8000-000000000001'; // sintético
+    const p = pool();
+    const query = p.query.getMockImplementation()!;
+    const scopedJob = { ...job, source_event_id: job.payload.crm_event_id, status: 'running',
+      locked_by: 'worker', claim_acquired_at: '2026-10-10 00:01:00.123456+00',
+      payload: { ...job.payload, channel_session_id: channelId } };
+    p.query.mockImplementation(async (...args) => {
+      const [sql] = args;
+      if (sql.startsWith('select *, locked_at::text')) return { rows: [scopedJob] } as never;
+      if (sql.includes('ct.phone_number as recipient')) return { rows: [{
+        id: channelId, organization_id: ids.org, provider: 'meta_cloud', phone_number: '+15555550230',
+        archived_at: null, meta_phone_number_id: '123456789', metadata: { ai_gate: 'open' },
+        safe: true, recipient: '+15555550111', latest_body: 'Hello', latest_inbound_id: job.payload.inbound_message_id,
+      }] } as never;
+      return query(...args);
+    });
+    if (missing) mocks.elegibilidade.mockResolvedValue(null);
+    else mocks.elegibilidade.mockRejectedValue(new Error('eligibility unavailable'));
+    vi.stubEnv('DEMO_INBOUND_ONLY', 'true'); vi.stubEnv('DEMO_CHANNEL_ID', channelId);
+    try {
+      const execute = () => assisted
+        ? createInboundTurnHandler(deps)(scopedJob as never, p as never, { workerId: 'worker' })
+        : runAgentTurn(deps, scopedJob as never, p as never, { workerId: 'worker' }, {
+          conversationId: ids.conversation, channelSessionId: channelId,
+        } as never);
+      await expect(withDemoInbound(p as never, {
+        channelId, organizationId: ids.org, startedAt: '2026-10-10T00:00:00Z',
+      }, scopedJob as never, execute)).rejects.toThrow(DemoIsolationError);
+      expect(mocks.draft).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

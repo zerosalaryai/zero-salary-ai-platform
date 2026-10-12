@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import type { ServiceBoundary } from "@/lib/atendimento/fronteira";
 /**
  * Motor de regras: consome eventos-gatilho do event_log e executa as
@@ -155,6 +156,7 @@ export async function runAutomationForEvent(
   admin: SupabaseClient,
   row: EventRow,
 ): Promise<HandlerResult> {
+  denyDemoWebAction();
   const serviceBoundaries = new Map<string, Promise<ServiceBoundary>>();
   const requestId = row.metadata?.request_id;
   const causedByRule =

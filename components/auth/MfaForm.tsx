@@ -6,13 +6,15 @@ import Link from "next/link";
 import { useT } from "@/hooks/i18n/useT";
 import { TOTPInput } from "@/components/auth/TOTPInput";
 import { Button } from "@/components/ui/button";
+import { demoWebLogin } from "@/lib/auth/demo-web-login";
 import { verifyMfa } from "@/app/actions/auth/verifyMfa";
 
 interface MfaFormProps {
   next?: string;
+  demoWeb?: boolean;
 }
 
-export function MfaForm({ next }: MfaFormProps) {
+export function MfaForm({ next, demoWeb = false }: MfaFormProps) {
   const t = useT();
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +42,7 @@ export function MfaForm({ next }: MfaFormProps) {
     if (finalCode.length !== 6 || locked) return;
     setError(null);
     startTransition(async () => {
-      const res = await verifyMfa(finalCode, next);
+      const res = demoWeb ? await demoWebLogin<Awaited<ReturnType<typeof verifyMfa>>>({kind:"totp",code:finalCode,next}) : await verifyMfa(finalCode, next);
       if (!res) return; // server-side redirect on success
       if (res.error === "mfa_locked") {
         setLocked(true);

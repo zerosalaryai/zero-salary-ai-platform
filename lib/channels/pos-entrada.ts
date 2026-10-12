@@ -1,3 +1,5 @@
+import { readDemoWebConfig } from "./demo-web-ingress";
+import { dispatchDemoWebInbound } from "./demo-web-binding";
 /**
  * OS EFEITOS QUE TRANSFORMAM UMA MENSAGEM EM TRABALHO.
  *
@@ -121,6 +123,7 @@ export async function aplicarEfeitosPosEntrada(
   admin: Admin,
   entrada: EntradaDeMensagem,
 ): Promise<void> {
+  if (readDemoWebConfig()) { await dispatchDemoWebInbound(entrada); return; }
   // ── CINTO DE SEGURANÇA, nunca a defesa principal ────────────────────────
   //
   // Os ingestores cortam o número interno de avisos ANTES de `upsertContact`,

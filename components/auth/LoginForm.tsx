@@ -10,9 +10,10 @@ import { loginSchema, type LoginInput } from "@/lib/auth/schemas";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { demoWebLogin } from "@/lib/auth/demo-web-login";
 import { signInWithPassword } from "@/app/actions/auth/signInWithPassword";
 
-export function LoginForm({ next }: { next?: string }) {
+export function LoginForm({ next, demoWeb = false }: { next?: string; demoWeb?: boolean }) {
   const t = useT();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -32,7 +33,7 @@ export function LoginForm({ next }: { next?: string }) {
     startTransition(async () => {
       // Server Action redirects on success — no return value reaches here.
       // On failure, an error discriminator is returned and rendered inline.
-      const res = await signInWithPassword(values, next);
+      const res = demoWeb ? await demoWebLogin<Awaited<ReturnType<typeof signInWithPassword>>>({kind:"login",credentials:values,next}) : await signInWithPassword(values, next);
       if (!res) {
         // Should be unreachable (redirect throws), but guard anyway.
         router.replace(next || "/app");

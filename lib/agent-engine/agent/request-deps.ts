@@ -27,6 +27,11 @@ export function requestTurnDeps(): InboundTurnDeps {
     }),
     llmCfg,
     knobs: turnKnobsFromEnv(env),
+    externalAgent: {
+      runtime: env.ZSAI_AGENT_RUNTIME,
+      baseUrl: env.ZSAI_PYTHON_AGENT_URL,
+      secret: env.ZSAI_INTERNAL_AGENT_SECRET,
+    },
     log: createLogger(),
   };
 }

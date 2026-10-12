@@ -1,3 +1,4 @@
+import { denyDemoAutomation } from "@/lib/channels/demo-inbound-only";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { protecaoAgendaSupabase } from "@/lib/agenda/protecao-followup";
 import { registerAction } from "@/lib/automation/actions";
@@ -11,6 +12,7 @@ import { reportarEnvio, type MensagemEnviada } from "@/lib/automation/desfecho-d
 import { checarGuardasDeContato } from "@/lib/automation/guarda-do-contato";
 
 async function postponeUntil(ctx: ActionCtx, config: Record<string, unknown>): Promise<string | null> {
+  denyDemoAutomation();
   const contato = checarGuardasDeContato(ctx);
   if (contato.ok) {
     const protection = (await protecaoAgendaSupabase(ctx.admin, ctx.organizationId, [contato.contact.id])).get(contato.contact.id)!;
@@ -30,6 +32,7 @@ async function postponeUntil(ctx: ActionCtx, config: Record<string, unknown>): P
 }
 
 async function execute(ctx: ActionCtx, config: Record<string, unknown>): Promise<ActionResultDetail> {
+  denyDemoAutomation();
   const sessionId = typeof config.channel_session_id === "string" ? config.channel_session_id : null;
   const template = typeof config.template === "string" ? config.template : null;
   if (!sessionId || !template) {

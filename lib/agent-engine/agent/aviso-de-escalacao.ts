@@ -53,6 +53,11 @@ import type { ChannelAdapter } from '../channel-adapter';
 import { runBeforeSend } from '../guardrails/before-send';
 import type { LgpdInput } from '../guardrails/lgpd/legal-basis';
 import type { Logger } from '../obs/logger';
+import {
+  detectReplyLanguage,
+  validateDeterministicReplyLanguage,
+  type ReplyLanguageResult,
+} from './reply-language';
 
 /**
  * `seq` do aviso no ledger de envio. Ver o cabeçalho: o turno usa 1..n.
@@ -105,6 +110,8 @@ export interface AvisoDeEscalacaoOpts {
   agentId?: string | null;
   disclosureMode?: 'inject' | 'veto';
   sleep?: (ms: number) => Promise<void>;
+  /** Trava do turno; aviso no idioma errado é suprimido, mas a passagem continua. */
+  replyLanguage?: ReplyLanguageResult;
 }
 
 /**
@@ -117,17 +124,30 @@ export async function avisarLeadDaEscalacao(
   ids: AvisoDeEscalacaoIds,
   opts: AvisoDeEscalacaoOpts,
 ): Promise<DesfechoDoAviso> {
+  const replyLanguage =
+    opts.replyLanguage === undefined || opts.replyLanguage.language === 'undetermined'
+      ? detectReplyLanguage('hello')
+      : opts.replyLanguage;
   let body: string;
   try {
     const { quem } = await expectativaDeAtendimento(pool, ids.tenantId, opts.now);
-    body = textoDoAviso(opts.motivo, quem, ids.leadId);
+    body = textoDoAviso(opts.motivo, quem, ids.leadId, replyLanguage.language);
   } catch (err) {
     // `expectativaDeAtendimento` já tem rede própria; se ainda assim quebrar,
     // a frase conservadora (sem prazo) é a certa — nunca a ausência de frase.
     opts.log.warn('aviso de escalação: disponibilidade não lida, usando a frase conservadora', {
       error: err instanceof Error ? err.message.slice(0, 120) : 'erro desconhecido',
     });
-    body = textoDoAviso(opts.motivo, null, ids.leadId);
+    body = textoDoAviso(opts.motivo, null, ids.leadId, replyLanguage.language);
+  }
+
+  const idioma = validateDeterministicReplyLanguage(body, replyLanguage);
+  if (!idioma.valid) {
+    opts.log.warn('aviso de escalação bloqueado por idioma divergente', {
+      expected_language: idioma.expected,
+      detected_language: idioma.detected,
+    });
+    return { avisado: false, porque: 'reply_language_mismatch' };
   }
 
   try {
@@ -139,6 +159,7 @@ export async function avisarLeadDaEscalacao(
       jobId: ids.jobId,
       channelSessionId: ids.channelSessionId,
       body,
+      replyLanguage,
       optedOutThisTurn: opts.optedOutThisTurn,
       // Ver `GateContext.spinningEnforced`: com o gate armado, a terceira pessoa
       // a ser escalada na mesma janela do número receberia silêncio — pelo

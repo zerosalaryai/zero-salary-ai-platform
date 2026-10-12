@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { readDemoConfig, bindDemoChannel, withDemoInbound, activateDemoWorker } from '@/lib/channels/demo-inbound-only';
 import { createApprovedReplyHandler } from "@/lib/agent-engine/agent/approved-reply";
 import { turnKnobsFromEnv } from "@/lib/agent-engine/agent/turn-knobs";
 import { createMeetDeliveryHandler } from "@/lib/agent-engine/agent/meet-delivery";
@@ -259,22 +261,26 @@ export async function startWorker(
   handlers: Map<JobKind, JobHandler>,
   log: Logger = createLogger(),
 ): Promise<void> {
+  denyDemoWebAction();
+  const demoConfig = readDemoConfig(env); // valida antes de conectar ou iniciar qualquer loop
   const pool = createPool(env.SUPABASE_DB_URL, (err) =>
     log.error("pool: conexão caiu — recria no próximo uso", { error: errMsg(err) }),
   );
   const workerId = `agent-engine-${hostname()}-${process.pid}`;
 
+  const demo = demoConfig ? await bindDemoChannel(pool, demoConfig) : undefined;
+  if (demo) activateDemoWorker(demo);
   await assertHarnessSchema(pool);
 
   // Self-host limpo: sem ponteiro platform, TODO inbound_turn morre. O seed só
   // age quando não existe ponteiro nenhum (regra dura nº 10 — nunca move
   // ponteiro existente) e é concorrência-safe (advisory lock).
-  const playbookSeed = await seedPlatformPlaybook(pool);
+  const playbookSeed = demo ? null : await seedPlatformPlaybook(pool);
   if (playbookSeed === "seeded") {
     log.info("playbook platform seedado no boot (primeiro boot do self-host)");
   }
 
-  const bootReap = await reapExpiredJobs(pool, {
+  const bootReap = demo ? { revived: 0, dead: 0 } : await reapExpiredJobs(pool, {
     visibilityTimeoutMs: env.QUEUE_VISIBILITY_TIMEOUT_MS,
   });
   if (bootReap.revived + bootReap.dead > 0) {
@@ -286,7 +292,7 @@ export async function startWorker(
   // (QUEUE_REAPER_INTERVAL_MS, 60 s por padrão), e até lá o orçamento e os knobs
   // do turno responderiam com o piso do `.env`, não com a escolha da tela.
   // Nunca lança: sem leitura boa, vale o piso — o comportamento de antes.
-  await carregarComportamentoPorPool(pool, pisoDoComportamentoDoMotor(env));
+  if (!demo) await carregarComportamentoPorPool(pool, pisoDoComportamentoDoMotor(env));
 
   const server = createHealthzServer(pool, log, env.METRICS_WINDOW_MS);
   await new Promise<void>((resolve, reject) => {
@@ -299,7 +305,7 @@ export async function startWorker(
   let shuttingDown = false;
   const inFlight = new Set<Promise<void>>();
 
-  const reaperTimer = setInterval(() => {
+  const reaperTimer = demo ? undefined : setInterval(() => {
     // Recarrega o comportamento da INSTALAÇÃO no ritmo do reaper: é o que faz
     // uma escolha feita na tela de admin alcançar ESTE processo sem restart
     // (issue #1034). O memo de 30 s evita ir ao banco a cada tique, e o
@@ -317,7 +323,7 @@ export async function startWorker(
 
   // Holds de sessão/saúde: retém jobs de envio de número fora do ar (WORKING é a
   // fonte channel_sessions, mantida pelo webhook do WAHA) — ritmo do reaper serve.
-  const holdsTimer = setInterval(() => {
+  const holdsTimer = demo ? undefined : setInterval(() => {
     enforceHolds(pool)
       .then(({ held, released }) => {
         if (held + released > 0) log.info("holds de sessão aplicados", { held, released });
@@ -339,6 +345,7 @@ export async function startWorker(
   const drainLoop = runDrainLoop(
     pool,
     {
+      demo,
       batchSize: env.CRM_DRAIN_BATCH_SIZE,
       intervalMs: env.CRM_DRAIN_INTERVAL_MS,
       idleIntervalMs: env.CRM_DRAIN_IDLE_INTERVAL_MS,
@@ -356,7 +363,7 @@ export async function startWorker(
   // turno espera, e o agente respondia "não consigo ouvir" com a transcrição
   // pronta segundos depois. O cron continua como rede de segurança — o claim
   // otimista do `drainEventLog` torna os dois seguros em paralelo.
-  const eventLogLoop = runEventLogDrainLoop(
+  const eventLogLoop = demo ? Promise.resolve() : runEventLogDrainLoop(
     {
       intervalMs: env.EVENT_LOG_DRAIN_INTERVAL_MS,
       idleIntervalMs: env.EVENT_LOG_DRAIN_IDLE_INTERVAL_MS,
@@ -369,7 +376,7 @@ export async function startWorker(
   // Watchdog de sessão (4A-2): reconcilia channel_sessions×WAHA + redrive de
   // queued. Liga só com as credenciais do WAHA no env (sem elas: warn + off).
   const sessionWatchdogLoop =
-    env.WAHA_API_BASE_URL !== undefined && env.WAHA_API_KEY !== undefined
+    !demo && env.WAHA_API_BASE_URL !== undefined && env.WAHA_API_KEY !== undefined
       ? runSessionWatchdogLoop(
           pool,
           {
@@ -390,7 +397,7 @@ export async function startWorker(
   // org. Sem a env, fica OFF: instalação que não usa a feature não paga o
   // custo de uma conexão SSE tentando alcançar um serviço que não existe.
   const voiceCallsBridgeLoop =
-    env.WACALLS_API_BASE_URL !== undefined && env.WACALLS_API_TOKEN !== undefined
+    !demo && env.WACALLS_API_BASE_URL !== undefined && env.WACALLS_API_TOKEN !== undefined
       ? runVoiceCallsBridgeLoop(
           pool,
           {
@@ -404,7 +411,7 @@ export async function startWorker(
       : (log.info('ponte WaCalls OFF — endereço ou credencial ausente no env', {}), Promise.resolve());
 
   // Circuito de saúde do número (block/response rate → hold).
-  const healthLoop = runHealthLoop(
+  const healthLoop = demo ? Promise.resolve() : runHealthLoop(
     pool,
     { intervalMs: env.NUMBER_HEALTH_INTERVAL_MS },
     log,
@@ -414,7 +421,7 @@ export async function startWorker(
   // Flywheel agendado (4B): judge→distiller periódico sobre turnos reais.
   // Precisa da camada LLM; sem intervalo (0) fica OFF.
   const flywheelLoop =
-    env.FLYWHEEL_INTERVAL_MS > 0
+    !demo && env.FLYWHEEL_INTERVAL_MS > 0
       ? runFlywheelLoop(
           pool,
           llmEdgeConfigFromEnv(env),
@@ -424,7 +431,7 @@ export async function startWorker(
       : Promise.resolve();
 
   // Cron persistente por contato (follow-up) — só enfileira em job_queue.
-  const cronLoop = runCronLoop(
+  const cronLoop = demo ? Promise.resolve() : runCronLoop(
     pool,
     {
       intervalMs: env.CRON_TICK_INTERVAL_MS,
@@ -443,6 +450,11 @@ export async function startWorker(
   };
 
   const runJob = async (job: JobRow): Promise<void> => {
+    if (demo && (job.kind !== 'inbound_turn' || job.organization_id !== demo.organizationId ||
+        job.payload.channel_session_id !== demo.channelId)) {
+      log.error('demo: aquisição fora do escopo recusada sem disposição do job', {});
+      return;
+    }
     try {
       const handler = handlers.get(job.kind);
       if (!handler) {
@@ -453,11 +465,13 @@ export async function startWorker(
         await handler(job, pool, { workerId });
         return;
       }
-      await withServiceJob(pool, job, () => handler(job, pool, { workerId }));
+      const execute = () => withServiceJob(pool, job, () => handler(job, pool, { workerId }));
+      if (demo) await withDemoInbound(pool, demo, job, execute);
+      else await execute();
       await completeJob(pool, job.id, workerId, undefined, claimOfJob(job)?.acquired_at);
       log.info("job concluído", { job_id: job.id, kind: job.kind });
       try {
-        const wrote = await recordRunMetrics(pool, job);
+        const wrote = demo ? 0 : await recordRunMetrics(pool, job);
         if (wrote > 0) {
           await evaluateCacheHitAlert(pool, job.organization_id, cacheAlertKnobs);
         }
@@ -536,8 +550,8 @@ export async function startWorker(
   };
 
   const workerLoop = rodarLoopDaFila<JobRow>({
-    relogio: () => faltaParaOProximoJob(pool),
-    claimar: () => claimJobs(pool, { workerId, maxConcurrency: env.QUEUE_MAX_CONCURRENCY }),
+    relogio: () => demo ? Promise.resolve(0) : faltaParaOProximoJob(pool),
+    claimar: () => claimJobs(pool, { workerId, maxConcurrency: env.QUEUE_MAX_CONCURRENCY, demo }),
     aoClaimar: (jobs) => {
       for (const job of jobs) {
         const running = runJob(job);
@@ -553,7 +567,7 @@ export async function startWorker(
     deveParar: () => shuttingDown,
     intervalos: {
       ociosoMs: env.QUEUE_POLL_INTERVAL_MS,
-      retryMs: env.QUEUE_CLAIM_RETRY_INTERVAL_MS,
+      retryMs: demo ? env.QUEUE_POLL_INTERVAL_MS : env.QUEUE_CLAIM_RETRY_INTERVAL_MS,
     },
     log,
   });
@@ -615,6 +629,7 @@ export async function startWorker(
   log.info("agent-engine pronto", {
     worker_id: workerId,
     healthz_port: port,
+    demo_inbound_only: Boolean(demo),
     max_concurrency: env.QUEUE_MAX_CONCURRENCY,
     poll_ocioso_ms: env.QUEUE_POLL_INTERVAL_MS,
     claim_retry_ms: env.QUEUE_CLAIM_RETRY_INTERVAL_MS,
@@ -648,6 +663,11 @@ export async function main(): Promise<void> {
     }),
     llmCfg: llmEdgeConfigFromEnv(env),
     knobs: turnKnobsFromEnv(env),
+    externalAgent: {
+      runtime: env.ZSAI_AGENT_RUNTIME,
+      baseUrl: env.ZSAI_PYTHON_AGENT_URL,
+      secret: env.ZSAI_INTERNAL_AGENT_SECRET,
+    },
     log,
     // Onda 5 (Task 5.1): fecha o turno dirigido por fluxo de volta no enrollment —
     // o worker fala pg puro (nunca Supabase client), então usa o adapter pg de

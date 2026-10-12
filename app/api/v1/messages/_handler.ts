@@ -1,3 +1,6 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
+import { assertDemoOutbound, demoInboundOnly, DemoIsolationError } from "@/lib/channels/demo-inbound-only";
 import { assertAgentOperationSupabase } from "@/lib/ai/agents/operation";
 import {
   assertApprovedReplySupabase,
@@ -250,6 +253,17 @@ export async function listMessagesHandler(
   conversationId: string,
   q: ListMessagesQuery,
 ): Promise<ListMessagesResult> {
+  const demoChannel = await demoInboxReadChannel(supabase, ctx);
+  let demoContact: string | undefined;
+  if (demoChannel) {
+    const { data, error } = await supabase.from("conversations").select("id, contact_id, contacts:contact_id!inner(id)")
+      .eq("organization_id", ctx.organization_id).eq("channel_session_id", demoChannel)
+      .eq("contacts.organization_id", ctx.organization_id)
+      .eq("id", conversationId).maybeSingle();
+    if (error || !data || !data.contact_id)
+      throw new ApiError(404, "not_found", undefined, ctx.requestId, "Conversation not found.");
+    demoContact = data.contact_id;
+  }
   // A CONSULTA VAI DO MAIS NOVO PARA O MAIS VELHO — de propósito.
   //
   // Antes era `ascending: true`: a primeira página trazia as `limit` mensagens
@@ -275,6 +289,8 @@ export async function listMessagesHandler(
     .order("sent_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(q.limit + 1);
+
+  if (demoChannel) query = query.eq("channel_session_id", demoChannel).eq("contact_id", demoContact!);
 
   if (q.cursor) {
     const c = decodeMsgCursor(q.cursor);
@@ -353,6 +369,9 @@ export async function sendMessageHandler(
   ctx: HandlerCtx,
   input: SendMessageInput,
 ): Promise<Message> {
+  denyDemoWebAction();
+  await assertDemoOutbound(ctx.organization_id, input.conversation_id);
+  if (demoInboundOnly() && (input.type !== 'text' || input.media_storage_path)) throw new DemoIsolationError();
   if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
   if (ctx.approvedReply) await assertApprovedReplySupabase(supabase, ctx.approvedReply);
   if (ctx.agentOperation) await assertAgentOperationSupabase(supabase, ctx.agentOperation);
@@ -750,6 +769,7 @@ export async function sendMessageHandler(
     try {
       // O que separa mídia de texto é a presença de `media` no envelope — o
       const checkBoundary = async () => {
+        await assertDemoOutbound(ctx.organization_id, input.conversation_id);
         await guardServiceEffect();
         await guardAgendaEffect();
         if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);

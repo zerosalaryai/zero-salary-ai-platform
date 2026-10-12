@@ -1,3 +1,4 @@
+import { demoWebRequestAllowed, readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookieSecure } from "@/lib/supabase/cookie-secure";
 import { NextResponse, type NextRequest } from "next/server";
@@ -11,7 +12,22 @@ import {
 const COOKIE_NAME = "sb-deskcomm-auth";
 
 export async function proxy(request: NextRequest) {
+  // Preserve the original matcher exclusions in normal mode.
+  if (!readDemoWebConfig() && (/^\/_next\/(static|image)(?:\/|$)/.test(request.nextUrl.pathname) ||
+      /^\/(favicon\.ico|robots\.txt|sitemap\.xml)$/.test(request.nextUrl.pathname) ||
+      /\.(svg|png|jpg|jpeg|gif|webp|ico|css|js)$/.test(request.nextUrl.pathname)))
+    return NextResponse.next();
+  // Before public-path bypass and before auth: no action-header/path spoofing.
+  if (!demoWebRequestAllowed(request.nextUrl.pathname, request.method,
+      request.headers.has("next-action")))
+    return NextResponse.json({ error: { code: "forbidden", message: "demo_web_ingress_denied" } }, { status: 403 });
+  if (readDemoWebConfig() && request.nextUrl.pathname === "/app")
+    return NextResponse.redirect(new URL("/app/inbox", request.url));
   const response = NextResponse.next({ request: { headers: request.headers } });
+  if (readDemoWebConfig())
+    // Browser clients must not write directly to Supabase or another transport.
+    // Deliberately disables external realtime/data calls in this private mode.
+    response.headers.set("Content-Security-Policy", "connect-src 'self'; form-action 'self'");
 
   // Inject X-Request-Id for downstream correlation (audit log, error wrappers).
   const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID();
@@ -29,7 +45,7 @@ export async function proxy(request: NextRequest) {
   const host = request.headers.get("host") ?? "";
   const isAdminSurface = host.startsWith("admin.") || pathname.startsWith("/admin");
 
-  if (isPublicPath(pathname)) {
+  if ((readDemoWebConfig() && pathname === "/api/demo-web-auth") || isPublicPath(pathname)) {
     return response;
   }
 
@@ -124,6 +140,6 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     // Run on all paths except static assets / Next internals.
-    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js)$).*)",
+    "/:path*",
   ],
 };

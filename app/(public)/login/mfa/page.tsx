@@ -1,3 +1,4 @@
+import { readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
 import { redirect } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/server";
@@ -36,7 +37,7 @@ export default async function MfaChallengePage({
           {t("Digite o código de 6 dígitos do seu autenticador.")}
         </p>
       </div>
-      <MfaForm next={next} />
+      <MfaForm next={next} demoWeb={readDemoWebConfig()} />
     </div>
   );
 }

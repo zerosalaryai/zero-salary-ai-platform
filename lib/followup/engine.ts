@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import type { JobClaim } from "@/lib/agent-engine/queue/claim";
 import { assertAgendaEffectSupabase } from "@/lib/agenda/efeito";
 import { AgendaDeferredError } from "@/lib/agenda/protecao-followup";
@@ -510,6 +511,7 @@ export async function aplicarRespostaInbound(
   enrollment: EnrollmentRow,
   inboundBody: string,
 ): Promise<void> {
+  denyDemoWebAction();
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
   await processEnrollment(deps, enrollment, summary, inboundBody);
 }
@@ -520,6 +522,7 @@ export async function avancarEnrollmentAtivo(
   deps: TickDeps,
   enrollment: EnrollmentRow,
 ): Promise<void> {
+  denyDemoWebAction();
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
   await processEnrollment(deps, enrollment, summary);
 }
@@ -724,6 +727,7 @@ async function processEnrollment(
 }
 
 export async function runFollowupTick(deps: TickDeps, opts?: { limit?: number }): Promise<TickSummary> {
+  denyDemoWebAction();
   const summary: TickSummary = { claimed: 0, advanced: 0, scheduled: 0, failed: 0, dead: 0 };
 
   let claimed: EnrollmentRow[];

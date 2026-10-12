@@ -1,4 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
+import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Core handlers para /api/v1/conversations.
  *
@@ -151,6 +153,7 @@ export async function listConversationsHandler(
   ctx: HandlerCtx,
   q: ListConversationsQuery,
 ): Promise<ListConversationsResult> {
+  const demoChannel = await demoInboxReadChannel(supabase, ctx, q.channel_session_id);
   // Fila: ordena por TEMPO DE ESPERA — quem espera há mais tempo primeiro. A
   // régua é `awaiting_since` = a mensagem do cliente MAIS ANTIGA sem resposta
   // (não `last_inbound_at`, que é reescrito a cada mensagem dele e fazia quem
@@ -173,11 +176,13 @@ export async function listConversationsHandler(
 
   let query = supabase
     .from("conversations")
-    .select(SELECT_COLS)
+    .select(demoChannel ? SELECT_COLS.replace("contacts:contact_id (", "contacts:contact_id!inner (") : SELECT_COLS)
     .eq("organization_id", ctx.organization_id)
     .order(sortCol, ordem)
     .order("id", { ascending: asc })
     .limit(q.limit + 1);
+
+  if (demoChannel) query = query.eq("channel_session_id", demoChannel).eq("contacts.organization_id", ctx.organization_id);
 
   // `.in` e não `.eq`: o filtro agora chega como LISTA (um valor vira lista de um,
   // e o SQL resultante é equivalente). É o que deixa a aba Fila pedir os dois
@@ -313,7 +318,15 @@ export async function listConversationsHandler(
       ...(pareceTelefone ? [`phone_number.ilike.*${somenteDigitos}*`] : []),
     ].join(",");
 
-    const { data: contatos } = await supabase
+    let demoContacts: string[] | undefined;
+    if (demoChannel) {
+      const { data, error } = await supabase.from("conversations").select("contact_id")
+        .eq("organization_id", ctx.organization_id).eq("channel_session_id", demoChannel)
+        .limit(TETO_DE_CONTATOS_NA_BUSCA);
+      if (error) throw new ApiError(500, "internal_error", undefined, ctx.requestId, "demo_web_ingress_denied");
+      demoContacts = (data ?? []).map((row) => row.contact_id);
+    }
+    let contactQuery = supabase
       .from("contacts")
       .select("id")
       // Service role bypassa RLS: o filtro de organização é manual e obrigatório.
@@ -342,6 +355,10 @@ export async function listConversationsHandler(
       // número de ids que cabe é consequência, e continua certo se as colunas
       // ou o formato do id mudarem.
       .limit(TETO_DE_CONTATOS_NA_BUSCA);
+    if (demoContacts) contactQuery = contactQuery.in("id", demoContacts);
+    const { data: contatos, error: contactError } = await contactQuery;
+    if (demoChannel && contactError)
+      throw new ApiError(500, "internal_error", undefined, ctx.requestId, "demo_web_ingress_denied");
 
     const ids = idsQueCabemNaURL(
       (contatos ?? []).map((c) => (c as { id: string }).id),
@@ -406,12 +423,14 @@ export async function getConversationHandler(
   ctx: HandlerCtx,
   conversationId: string,
 ): Promise<Conversation> {
-  const { data, error } = await supabase
+  const demoChannel = await demoInboxReadChannel(supabase, ctx);
+  let query = supabase
     .from("conversations")
-    .select(SELECT_COLS)
+    .select(demoChannel ? SELECT_COLS.replace("contacts:contact_id (", "contacts:contact_id!inner (") : SELECT_COLS)
     .eq("id", conversationId)
-    .eq("organization_id", ctx.organization_id)
-    .maybeSingle();
+    .eq("organization_id", ctx.organization_id);
+  if (demoChannel) query = query.eq("channel_session_id", demoChannel).eq("contacts.organization_id", ctx.organization_id);
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, error.message);
@@ -438,6 +457,7 @@ export async function patchConversationHandler(
   conversationId: string,
   input: PatchConversationInput,
 ): Promise<Conversation> {
+  denyDemoWebAction();
   const update: Record<string, unknown> = {};
 
   /**

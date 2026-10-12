@@ -4,6 +4,7 @@ import {
   AI_ALLOWLIST_TTL_DAYS_DEFAULT,
   decidirElegibilidade,
   lerModoDoGate,
+  montarEstadoDeElegibilidade,
   ttlDaAutorizacaoMs,
   type EstadoDeElegibilidade,
 } from "./gate";
@@ -24,14 +25,28 @@ const base: EstadoDeElegibilidade = {
 };
 
 describe("lerModoDoGate", () => {
-  it("só 'allowlist' liga o modo; resto (ausente/null/lixo) é 'open'", () => {
+  it("preserva open explícito e o default ausente/null", () => {
+    for (const raw of ["open", undefined, null]) expect(lerModoDoGate(raw)).toBe("open");
     expect(lerModoDoGate("allowlist")).toBe("allowlist");
-    expect(lerModoDoGate("open")).toBe("open");
-    expect(lerModoDoGate(undefined)).toBe("open");
-    expect(lerModoDoGate(null)).toBe("open");
-    expect(lerModoDoGate("ALLOWLIST")).toBe("open");
-    expect(lerModoDoGate(42)).toBe("open");
   });
+
+  it.each(["off", "ALLOWLIST", "unknown", "", false, 42, {}, []])(
+    "valor explícito %j falha fechado, mesmo com autorização e número de teste",
+    (aiGate) => {
+      const estado = montarEstadoDeElegibilidade({
+        aiGate, aiGateMode: "pre_go_live",
+        aiTestPhoneNumbers: ["+5511999990230"], contactPhoneNumber: "+5511999990230",
+        forceHuman: false, assigneeKind: "ai", botSilencedUntil: null,
+        aiAuthorizedAt: AGORA, agora: AGORA, ttlMs: base.ttlMs,
+      });
+      expect(lerModoDoGate(aiGate)).toBe("off");
+      for (const forceHuman of [false, true]) {
+        expect(decidirElegibilidade({ ...estado, forceHuman })).toMatchObject({
+          permite: false, motivo: "gate_desligado",
+        });
+      }
+    },
+  );
 });
 
 describe("decidirElegibilidade — gate 'open' (comportamento de hoje)", () => {

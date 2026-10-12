@@ -1,3 +1,4 @@
+import { assertDemoBeforeSend } from '@/lib/channels/demo-inbound-only';
 import { assertAgentOperationPg, type AgentOperationContext } from '@/lib/ai/agents/operation';
 import { assertApprovedReplyPg, type ApprovedReplyContext } from '@/lib/ai/replies/delivery';
 import { assertMeetingDeliveryPg, type MeetingDeliveryContext } from '@/lib/agenda/meet-delivery';
@@ -74,6 +75,7 @@ import { detectarVazamentoInterno, renderVetoDeVazamento } from './vazamento-int
 import { capabilitiesOf, DEFAULT_CHANNEL_PROVIDER } from '@/lib/channels/capabilities';
 import { isWindowOpen } from './messaging-window';
 import type { ChannelProvider } from '@/lib/channels/capabilities';
+import { validateReplyLanguage, type ReplyLanguageResult } from '../agent/reply-language';
 
 /** O que os gates enxergam — carregado UMA vez sob o lock, por tentativa de envio. */
 export interface GateContext {
@@ -255,6 +257,8 @@ export interface GateContext {
    * site, que é quem monta as tools).
    */
   agenda?: { active: boolean; ferramentas: readonly string[]; toolCalledThisTurn: boolean };
+  /** Idioma derivado da última inbound ainda sem resposta. Ausente = gate no-op. */
+  replyLanguage?: ReplyLanguageResult | null;
 }
 
 /**
@@ -639,6 +643,28 @@ export const disclosureGate: Gate = {
 };
 
 /**
+ * Última barreira antes do transporte. Roda DEPOIS do disclosure porque ele pode
+ * emendar o corpo: a validação precisa julgar exatamente o texto que chegaria ao
+ * cliente, não apenas o argumento originalmente produzido pelo modelo.
+ */
+export const replyLanguageGate: Gate = {
+  name: 'reply_language',
+  evaluate: (ctx) => {
+    if (ctx.replyLanguage == null) return { pass: true };
+    const verdict = validateReplyLanguage(ctx.body, ctx.replyLanguage);
+    if (verdict.valid) return { pass: true };
+    return {
+      pass: false,
+      code: 'reply_language_mismatch',
+      reason:
+        `The customer requires ${verdict.expected}. Rewrite the complete customer-facing ` +
+        'message in that language. Do not copy the language used by internal instructions, tools, or older history.',
+      detail: { expected: verdict.expected, detected: verdict.detected },
+    };
+  },
+};
+
+/**
  * Gate 2 — anti-ban: janela/warm-up/cap vetam; throttle vira `waitMs` (espera, não veto).
  *
  * A capability `banRisk` do canal decide se a parte ANTI-BAN arma. Ela entra em
@@ -764,7 +790,7 @@ const spinningGate: Gate = {
  * `crm_book_appointment` nas tools, então a v7 também não muda o destino de nenhum envio que
  * já existia fora desse caso — muda o TRACE e passa a medir/impedir a promessa vazia.
  */
-export const BEFORE_SEND_CHAIN_VERSION = 7;
+export const BEFORE_SEND_CHAIN_VERSION = 8;
 
 /**
  * Ordem FINAL da cadeia (F4-08/F4-09; edge-contract §before_send / blueprint órgão 5) — DADO
@@ -796,6 +822,7 @@ export const BEFORE_SEND_GATES: readonly Gate[] = [
   internalVocabularyGate,
   agendaStallGate,
   disclosureGate,
+  replyLanguageGate,
 ];
 
 /** Uma linha do trace de auditoria — um registro por gate avaliado na tentativa. */
@@ -916,6 +943,8 @@ export interface RunBeforeSendArgs {
    * no-op (retrocompatível com todo caller que não conhece agenda, ex.: `followup-turn.ts`).
    */
   agenda?: GateContext['agenda'];
+  /** Ativa a trava final de idioma para esta mensagem automática. */
+  replyLanguage?: ReplyLanguageResult;
   /**
    * Pausa humana do turno, paga ANTES de o guardrail tomar conexão/transação
    * (issue #654) — o porquê está no corpo de `runBeforeSend`. Ausente (default)
@@ -998,6 +1027,7 @@ const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTim
  * espera é a única coisa que sai da janela da transação.
  */
 export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSendResult> {
+  await assertDemoBeforeSend(args);
   const gates = args.gates ?? BEFORE_SEND_GATES;
   // Fora do lock (nem conexão tomada): aqui não existe transação aberta para segurar.
   if (args.esperaForaDoLock) await args.esperaForaDoLock();
@@ -1127,6 +1157,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
         : {}),
       internalVocabularyEnforced: args.enforceInternalVocabulary ?? false,
       ...(args.agenda !== undefined ? { agenda: args.agenda } : {}),
+      replyLanguage: args.replyLanguage ?? null,
     };
 
     const { body: evaluatedBody, trace, veto, throttleWaitMs } = evaluateBeforeSend(ctx, gates);
@@ -1190,6 +1221,7 @@ export async function runBeforeSend(args: RunBeforeSendArgs): Promise<BeforeSend
     // ctx.body é o corpo FINAL (emendado pelo disclosureGate F4-05 quando aplicável).
     if (args.approvedReply && ctx.body !== args.body)
       throw new Error('reply_body_changed_reapproval_required');
+    await assertDemoBeforeSend(args);
     const outcome = await args.send(ctx.body);
 
     // Registra pacing + copy SÓ no envio físico fresco ('sent'). 'already_sent'/'queued'

@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import { protecaoAgendaSupabase } from "@/lib/agenda/protecao-followup";
 import { assertServiceBoundarySupabase } from "@/lib/atendimento/origem";
 import { StaleServiceBoundaryError, parseServiceBoundary, assertCurrentServiceBoundary, type ServiceBoundary } from "@/lib/atendimento/fronteira";
@@ -92,6 +93,7 @@ export interface SilenceSweepDeps {
 }
 
 export async function runSilenceSweep(deps: SilenceSweepDeps): Promise<SilenceSweepSummary> {
+  denyDemoWebAction();
   const { db, gateDb, clock } = deps;
   const summary: SilenceSweepSummary = {
     pointers_scanned: 0,

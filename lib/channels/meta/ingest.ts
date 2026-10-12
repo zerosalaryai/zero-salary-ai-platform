@@ -1,3 +1,5 @@
+import { DemoWebDenied, readDemoWebConfig } from "../demo-web-ingress";
+import { assertDemoWebIngest, demoWebSessionForIngest, ingestDemoWebAtomic } from "../demo-web-binding";
 /**
  * Ingestão de mensagem RECEBIDA pelo canal oficial — a metade que faltava.
  *
@@ -146,7 +148,9 @@ export async function ingestMetaInbound(
 ): Promise<IngestOutcome> {
   let sessao: { id: string; organization_id: string } | null;
   try {
-    sessao = await sessionByPhoneNumberId(admin, dono.organizationId, e.phoneNumberId);
+    assertDemoWebIngest(dono.organizationId, e);
+    sessao = readDemoWebConfig() ? demoWebSessionForIngest(dono.organizationId,e)
+      : await sessionByPhoneNumberId(admin, dono.organizationId, e.phoneNumberId);
   } catch (err) {
     // Falhar FECHADO na ação (nada é gravado) e ABERTO na informação: o motivo
     // sobe como `failed` e o chamador o escreve no log e no corpo.
@@ -178,6 +182,8 @@ export async function ingestMetaInbound(
     return { status: "ignored", reason: "numero_interno_de_aviso" };
   }
 
+  if (readDemoWebConfig()) return ingestDemoWebAtomic(admin, e, orgId);
+
   const existente = await findContactByVariants(admin, orgId, e.from);
   // Celular BR grava COM o nono. A busca acima já reencontra a grafia sem o 9;
   // a RPC promove o cadastro antigo quando ainda está nos 12 dígitos.
@@ -204,7 +210,7 @@ export async function ingestMetaInbound(
   // AQUI, antes de `aplicarEfeitosPosEntrada`, porque é lá que o lead nasce. A
   // guarda de primeiro toque fica no banco, então a re-entrega não reescreve.
   const atribuicao = extrairAtribuicaoMeta(e.referral);
-  if (atribuicao) await estamparAtribuicaoDoContato(admin, contactId as string, atribuicao);
+  if (!readDemoWebConfig() && atribuicao) await estamparAtribuicaoDoContato(admin, contactId as string, atribuicao);
 
   const { data: conversationId, error: erroConversa } = await admin.rpc(
     "fn_upsert_wa_conversation" as never,
@@ -245,7 +251,13 @@ export async function ingestMetaInbound(
 
   // 23505 = a mesma `external_id` já entrou. Não é erro: é a Meta re-entregando.
   if (erroInsert) {
-    if (erroInsert.code === "23505") return { status: "duplicate" };
+    if (erroInsert.code === "23505") {
+      // No demo não há recibo atômico de opt-out/despacho concluído. A existência
+      // da mensagem não prova conclusão, e emitir de novo pode duplicar o turno.
+      // Não confirma sucesso nem recupera mensagens antigas por suposição.
+      if (readDemoWebConfig()) throw new DemoWebDenied();
+      return { status: "duplicate" };
+    }
     return { status: "failed", reason: `mensagem: ${erroInsert.message}` };
   }
 
@@ -269,7 +281,7 @@ export async function ingestMetaInbound(
   });
 
   const messageId = (inserida as { id: string } | null)?.id ?? "";
-  if (e.media && messageId) {
+  if (!readDemoWebConfig() && e.media && messageId) {
     const { error: erroPersistencia } = await admin.rpc("emit_event" as never, {
       p_event_type: "media.persist_requested",
       p_entity_kind: "message",

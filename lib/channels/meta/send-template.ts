@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { denyDemoAutomation } from "../demo-inbound-only";
 /**
  * Disparo de template pela Cloud API — **a saída do gate `messaging_window`**.
  *
@@ -54,6 +56,8 @@ interface GraphResponse {
 }
 
 export async function sendTemplate(input: SendTemplateInput): Promise<SendTemplateResult> {
+  denyDemoWebAction();
+  denyDemoAutomation();
   // 1) O bind ainda vale? Template editado na Meta desde a configuração manda 2 de 3
   //    parâmetros e falha com 132000 — no disparo, com o lead esperando.
   const estado = bindingState(input.binding, input.current);

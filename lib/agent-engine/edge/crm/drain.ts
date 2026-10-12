@@ -1,3 +1,5 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
+import { assertDemoInbound, type DemoBinding } from '@/lib/channels/demo-inbound-only';
 /**
  * Drain pós-fusão: consome `ai_agent.dispatch_requested` do event_log (MESMO
  * banco — a role vendaval_drain e o transporte cross-banco morreram) e enfileira
@@ -42,6 +44,7 @@ interface EventRow {
 }
 
 export interface DrainKnobs {
+  demo?: DemoBinding;
   batchSize: number;
   intervalMs: number;
   idleIntervalMs: number;
@@ -60,10 +63,26 @@ export interface DrainKnobs {
 /** Default de `allowlistTtlMs` (21 dias) para testes que omitem o knob. */
 const ALLOWLIST_TTL_MS_PADRAO = 21 * 24 * 60 * 60 * 1000;
 
+// Selecione só eventos novos com identidade confirmada por conversa/mensagem.
+const DEMO_EVENT_SCOPE_SQL = `
+         and ev.organization_id=$3 and ev.created_at >= $5::timestamptz
+         and exists (
+           select 1 from conversations cv
+           join channel_sessions cs on cs.id=cv.channel_session_id and cs.organization_id=cv.organization_id
+           join messages m on m.id::text=ev.payload->>'inbound_message_id'
+             and m.organization_id=cv.organization_id and m.conversation_id=cv.id
+             and m.contact_id=cv.contact_id and m.channel_session_id=cs.id and m.direction='inbound'
+           where cv.id::text=ev.payload->>'conversation_id' and cv.organization_id=ev.organization_id
+             and cs.id=$4 and cs.archived_at is null and cs.metadata->>'ai_gate'='open'
+             and m.created_at >= $5::timestamptz and coalesce(m.sent_at,m.created_at) >= $5::timestamptz
+             and ev.payload->>'channel_session_id'=cs.id::text and ev.payload->>'contact_id'=cv.contact_id::text
+         )`;
+
 /** Um tick do drain: claima um lote de eventos e os transforma em jobs. */
 export async function drainTick(pool: pg.Pool, knobs: DrainKnobs, log: Logger): Promise<number> {
+  denyDemoWebAction();
   // Reaper de eventos órfãos — barato (update indexado), roda a cada tick.
-  await pool.query(
+  if (!knobs.demo) await pool.query(
     `update event_log set status = 'pending', updated_at = now()
      where event_type = 'ai_agent.dispatch_requested'
        and status = 'processing'
@@ -78,16 +97,17 @@ export async function drainTick(pool: pg.Pool, knobs: DrainKnobs, log: Logger): 
          consumed_by = array_append(array_remove(coalesce(e.consumed_by, '{}'), $2), $2),
          updated_at = now()
      where e.id in (
-       select id from event_log
+       select ev.id from event_log ev
        where event_type = 'ai_agent.dispatch_requested'
          and status = 'pending'
+         ${knobs.demo ? DEMO_EVENT_SCOPE_SQL : ''}
          and (next_attempt_at is null or next_attempt_at <= now())
        order by created_at
        limit $1
        for update skip locked
      )
      returning e.id, e.organization_id, e.payload, e.attempts, e.created_at`,
-    [knobs.batchSize, DRAIN_CONSUMER],
+    knobs.demo ? [knobs.batchSize, DRAIN_CONSUMER, knobs.demo.organizationId, knobs.demo.channelId, knobs.demo.startedAt] : [knobs.batchSize, DRAIN_CONSUMER],
   );
 
   for (const event of events) {
@@ -211,6 +231,11 @@ async function processEvent(
     return 'processado';
   }
   const p = parsed.data;
+  if (knobs.demo) await assertDemoInbound(pool, knobs.demo, {
+    organizationId: event.organization_id, conversationId: p.conversation_id,
+    contactId: p.contact_id, channelId: p.channel_session_id,
+    inboundMessageId: p.inbound_message_id, eventId: event.id,
+  });
 
   // Spec 14: org em modo 'external' tem agente EXTERNO como dono da conversa —
   // o engine não responde por cima. Evento é consumido (done) sem job.
@@ -351,8 +376,9 @@ async function processEvent(
   // TURNO quem garante isso — aqui a decisão só se antecipa para não enfileirar.
   //
   // Repare no `!canAssist` do `if` abaixo: com agente assistido publicado no
-  // canal o gate é desligado INTEIRO nesta ponta, de propósito (o rascunho é o
-  // produto do modo assistido, barrar aqui o mataria). A frase que este
+  // canal o allowlist é dispensado nesta ponta, de propósito (o rascunho é o
+  // produto do modo assistido, barrar aqui o mataria). A trava off/ inválida
+  // continua obrigatória. A frase que este
   // comentário trazia — "o turno revalida" — era falsa justamente nesse caso: o
   // ramo assistido de `createInboundTurnHandler` devolvia antes das guardas de
   // `runAgentTurn`. As duas checagens agora vivem dentro daquele ramo
@@ -372,15 +398,17 @@ async function processEvent(
       agora: new Date(),
       ttlMs: knobs.allowlistTtlMs ?? ALLOWLIST_TTL_MS_PADRAO,
     });
-    if (!canAssist && elegib !== null && !elegib.permite) {
+    // 'off' (inclui valor explícito inválido) veta também os rascunhos assistidos.
+    if ((knobs.demo && elegib === null) || (elegib !== null && !elegib.permite && (knobs.demo || !canAssist || elegib.motivo === 'gate_desligado'))) {
       log.info('drain: conversa não elegível para IA — turno pulado (sem gasto)', {
         event_id: event.id,
         conversation_id: p.conversation_id,
-        motivo: elegib.motivo,
+        motivo: elegib?.motivo ?? 'demo_eligibility_missing',
       });
       return 'processado';
     }
   } catch (err) {
+    if (knobs.demo) throw err;
     // Falha da consulta de elegibilidade NÃO derruba o drain e NÃO bloqueia o
     // turno: um lead real pode estar esperando. Degrada para o fluxo antigo
     // (enfileira) — o turno tem a segunda checagem.

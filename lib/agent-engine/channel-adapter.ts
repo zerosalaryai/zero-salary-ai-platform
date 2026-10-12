@@ -27,6 +27,12 @@ export interface ChannelSendInput {
   conversationId: string;
   body: string;
   /**
+   * Metadado validado do runtime externo ligado à intenção que efetivamente
+   * passou pelos gates. Nunca é enviado ao canal; fica no ledger para concluir
+   * o pós-envio sem regenerar nem reenviar após crash.
+   */
+  acceptedResponse?: unknown;
+  /**
    * Presente = este envio é um TEMPLATE aprovado, não texto livre.
    *
    * Opcional de propósito: o contrato continua válido para todo canal que só sabe

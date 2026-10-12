@@ -1,3 +1,4 @@
+import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 /**
  * Watchdog de sessão (Fase 4A-2) — o pedaço do Vendaval que ficou de fora do
  * porte e cuja falta causou o incidente real das mensagens presas: o webhook
@@ -303,6 +304,7 @@ export async function redriveQueued(
   cfg: WatchdogConfig,
   log: Logger,
 ): Promise<number> {
+  denyDemoWebAction();
   const { rows } = await pool.query<QueuedRow>(
     `select m.id, m.organization_id, m.conversation_id, m.body, s.waha_session_name,
             c.wa_identity, c.wa_lid, c.phone_number, v.is_group, v.group_chat_id
@@ -456,6 +458,7 @@ export async function runSessionWatchdogLoop(
   log: Logger,
   signal: AbortSignal,
 ): Promise<void> {
+  denyDemoWebAction();
   while (!signal.aborted) {
     try {
       const fixed = await reconcileSessions(pool, cfg, log);

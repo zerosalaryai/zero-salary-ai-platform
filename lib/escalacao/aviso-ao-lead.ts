@@ -51,6 +51,7 @@
 
 import { createHash } from "node:crypto";
 
+import type { ReplyLanguage } from "@/lib/agent-engine/agent/reply-language";
 import type { QuemPodeAssumir } from "./disponibilidade";
 
 /**
@@ -108,7 +109,7 @@ export function motivoDoAviso(reason: string): MotivoDoAviso {
  */
 
 /** Aberturas por motivo. O índice sai do hash do lead — ver o bloco acima. */
-const ABERTURAS: Record<MotivoDoAviso, readonly string[]> = {
+const ABERTURAS_EM_PORTUGUES: Record<MotivoDoAviso, readonly string[]> = {
   // Quem pediu para parar não quer ouvir sobre atendente. Confirma o que ele
   // pediu, diz que uma pessoa vai conferir, e para. Responder ao pedido de
   // parada é padrão de mensageria (a confirmação de opt-out), não insistência.
@@ -135,7 +136,7 @@ const ABERTURAS: Record<MotivoDoAviso, readonly string[]> = {
 };
 
 /** Fechos por estado da equipe. Mesmo sorteio, mesma razão. */
-const FECHOS = {
+const FECHOS_EM_PORTUGUES = {
   /** Ninguém configurado, ou leitura falhou: NADA de prazo. */
   sem_equipe: [
     "Seu pedido ficou registrado e a equipe responde assim que possível.",
@@ -155,6 +156,112 @@ const FECHOS = {
     "Aguarde só um momento nesta conversa, por favor.",
   ],
 } as const;
+
+interface TextosDoAviso {
+  aberturas: Record<MotivoDoAviso, readonly string[]>;
+  fechos: {
+    sem_equipe: readonly string[];
+    fora_de_expediente: readonly string[];
+    com_equipe: readonly string[];
+  };
+  confirmacaoOptOut: string;
+}
+
+const TEXTOS_POR_IDIOMA: Record<Exclude<ReplyLanguage, "undetermined">, TextosDoAviso> = {
+  portuguese: {
+    aberturas: ABERTURAS_EM_PORTUGUES,
+    fechos: FECHOS_EM_PORTUGUES,
+    confirmacaoOptOut: "Encaminhei seu pedido para uma pessoa da equipe confirmar.",
+  },
+  english: {
+    aberturas: {
+      suspeita_de_opt_out: ["Understood. I’ll stop sending automated messages here."],
+      pediu_humano: ["Of course. I’m bringing in a member of our team to speak with you."],
+      orcamento_de_ia: ["I’m transferring your conversation to a member of our team."],
+      outro: ["A member of our team is better placed to help with this. I’ve notified them."],
+    },
+    fechos: {
+      sem_equipe: ["Your request has been recorded, and the team will reply as soon as possible."],
+      fora_de_expediente: ["No one is available right now, but your request is in the team’s queue."],
+      com_equipe: ["Please stay in this conversation; someone will reply shortly."],
+    },
+    confirmacaoOptOut: "I’ve sent your request to a team member for confirmation.",
+  },
+  malayalam: {
+    aberturas: {
+      suspeita_de_opt_out: ["മനസ്സിലായി. ഇനി ഇവിടെ സ്വയമേവയുള്ള സന്ദേശങ്ങൾ അയയ്ക്കില്ല."],
+      pediu_humano: ["തീർച്ചയായും. നിങ്ങളുമായി സംസാരിക്കാൻ ടീമിലെ ഒരാളെ അറിയിച്ചിട്ടുണ്ട്."],
+      orcamento_de_ia: ["നിങ്ങളുടെ സംഭാഷണം ടീമിലെ ഒരാൾക്ക് കൈമാറുന്നു."],
+      outro: ["ഇത് ടീമിലെ ഒരാൾ കൈകാര്യം ചെയ്യുന്നതാണ് ഉചിതം. അവരെ അറിയിച്ചിട്ടുണ്ട്."],
+    },
+    fechos: {
+      sem_equipe: ["നിങ്ങളുടെ അഭ്യർഥന രേഖപ്പെടുത്തി; കഴിയുന്നത്ര വേഗം ടീം മറുപടി നൽകും."],
+      fora_de_expediente: ["ഇപ്പോൾ ആരും ലഭ്യമല്ല; നിങ്ങളുടെ അഭ്യർഥന ടീമിന്റെ നിരയിൽ ചേർത്തിട്ടുണ്ട്."],
+      com_equipe: ["ഈ സംഭാഷണത്തിൽ ഒരു നിമിഷം കാത്തിരിക്കൂ; ഒരാൾ ഉടൻ മറുപടി നൽകും."],
+    },
+    confirmacaoOptOut: "ഇത് സ്ഥിരീകരിക്കാൻ നിങ്ങളുടെ അഭ്യർഥന ടീമിലെ ഒരാൾക്ക് കൈമാറി.",
+  },
+  malayalam_english_mixed: {
+    aberturas: {
+      suspeita_de_opt_out: ["Okay — ഇനി ഇവിടെ automated messages അയയ്ക്കില്ല."],
+      pediu_humano: ["Sure — നിങ്ങളോട് സംസാരിക്കാൻ team member-നെ അറിയിച്ചിട്ടുണ്ട്."],
+      orcamento_de_ia: ["നിങ്ങളുടെ conversation ഒരു team member-ന് കൈമാറുന്നു."],
+      outro: ["ഇത് ഒരു team member handle ചെയ്യുന്നതാണ് നല്ലത്; അവരെ അറിയിച്ചിട്ടുണ്ട്."],
+    },
+    fechos: {
+      sem_equipe: ["നിങ്ങളുടെ request രേഖപ്പെടുത്തി; team കഴിയുന്നത്ര വേഗം reply ചെയ്യും."],
+      fora_de_expediente: ["ഇപ്പോൾ ആരും available അല്ല; request team queue-യിൽ ചേർത്തിട്ടുണ്ട്."],
+      com_equipe: ["ഈ chat-ൽ ഒരു moment കാത്തിരിക്കൂ; ഒരാൾ ഉടൻ reply ചെയ്യും."],
+    },
+    confirmacaoOptOut: "Confirmation-നായി request ഒരു team member-ന് കൈമാറി.",
+  },
+  arabic: {
+    aberturas: {
+      suspeita_de_opt_out: ["فهمت. سأتوقف عن إرسال الرسائل التلقائية هنا."],
+      pediu_humano: ["بالتأكيد. أبلغت أحد أعضاء الفريق ليتحدث معك."],
+      orcamento_de_ia: ["سأحوّل محادثتك إلى أحد أعضاء الفريق."],
+      outro: ["من الأفضل أن يساعدك أحد أعضاء الفريق في هذا الأمر. لقد أبلغتهم."],
+    },
+    fechos: {
+      sem_equipe: ["تم تسجيل طلبك، وسيرد الفريق في أقرب وقت ممكن."],
+      fora_de_expediente: ["لا أحد متاح الآن، لكن طلبك أُضيف إلى قائمة انتظار الفريق."],
+      com_equipe: ["يرجى البقاء في هذه المحادثة؛ سيرد عليك أحدهم قريبًا."],
+    },
+    confirmacaoOptOut: "أرسلت طلبك إلى أحد أعضاء الفريق للتأكيد.",
+  },
+  hindi: {
+    aberturas: {
+      suspeita_de_opt_out: ["समझ गया। अब मैं यहाँ स्वचालित संदेश भेजना बंद कर दूँगा।"],
+      pediu_humano: ["ज़रूर। मैंने टीम के एक सदस्य को आपसे बात करने के लिए सूचित कर दिया है।"],
+      orcamento_de_ia: ["मैं आपकी बातचीत टीम के एक सदस्य को सौंप रहा हूँ।"],
+      outro: ["इस मामले में टीम का कोई सदस्य बेहतर सहायता कर सकता है। मैंने उन्हें सूचित कर दिया है।"],
+    },
+    fechos: {
+      sem_equipe: ["आपका अनुरोध दर्ज हो गया है; टीम जल्द से जल्द जवाब देगी।"],
+      fora_de_expediente: ["अभी कोई उपलब्ध नहीं है, लेकिन आपका अनुरोध टीम की कतार में है।"],
+      com_equipe: ["कृपया इसी बातचीत में बने रहें; कोई जल्द जवाब देगा।"],
+    },
+    confirmacaoOptOut: "पुष्टि के लिए आपका अनुरोध टीम के एक सदस्य को भेज दिया है।",
+  },
+  tamil: {
+    aberturas: {
+      suspeita_de_opt_out: ["புரிந்தது. இனி இங்கே தானியங்கி செய்திகளை அனுப்ப மாட்டேன்."],
+      pediu_humano: ["நிச்சயமாக. உங்களுடன் பேச குழுவில் ஒருவருக்கு தெரிவித்துள்ளேன்."],
+      orcamento_de_ia: ["உங்கள் உரையாடலை குழுவில் ஒருவரிடம் மாற்றுகிறேன்."],
+      outro: ["இதில் குழுவில் ஒருவர் உதவுவது சிறந்தது. அவர்களுக்கு தெரிவித்துள்ளேன்."],
+    },
+    fechos: {
+      sem_equipe: ["உங்கள் கோரிக்கை பதிவு செய்யப்பட்டது; குழு விரைவில் பதிலளிக்கும்."],
+      fora_de_expediente: ["இப்போது யாரும் கிடைக்கவில்லை; உங்கள் கோரிக்கை குழுவின் வரிசையில் சேர்க்கப்பட்டது."],
+      com_equipe: ["இந்த உரையாடலில் காத்திருக்கவும்; ஒருவர் விரைவில் பதிலளிப்பார்."],
+    },
+    confirmacaoOptOut: "உறுதிப்படுத்த உங்கள் கோரிக்கையை குழுவில் ஒருவருக்கு அனுப்பியுள்ளேன்.",
+  },
+};
+
+function textosDoIdioma(idioma: ReplyLanguage): TextosDoAviso {
+  return idioma === "undetermined" ? TEXTOS_POR_IDIOMA.portuguese : TEXTOS_POR_IDIOMA[idioma];
+}
 
 /**
  * Variante DETERMINÍSTICA por lead: sha256(lead_id) → uint32 → módulo.
@@ -186,22 +293,24 @@ export function textoDoAviso(
   motivo: MotivoDoAviso,
   quem: QuemPodeAssumir | null,
   leadId: string,
+  idioma: ReplyLanguage = "undetermined",
 ): string {
-  const abertura = variante(leadId, ABERTURAS[motivo]);
+  const textos = textosDoIdioma(idioma);
+  const abertura = variante(leadId, textos.aberturas[motivo]);
 
   if (motivo === "suspeita_de_opt_out") {
     // Sem fecho de expediente: quem pediu para parar não está esperando
     // atendimento, então "aguarde um instante" seria a resposta errada à
     // pergunta que ele fez.
-    return `${abertura} Encaminhei seu pedido para uma pessoa da equipe confirmar.`;
+    return `${abertura} ${textos.confirmacaoOptOut}`;
   }
 
   const fecho =
     quem === null || quem.total === 0
-      ? variante(leadId, FECHOS.sem_equipe)
+      ? variante(leadId, textos.fechos.sem_equipe)
       : quem.disponiveis === 0
-        ? variante(leadId, FECHOS.fora_de_expediente)
-        : variante(leadId, FECHOS.com_equipe);
+        ? variante(leadId, textos.fechos.fora_de_expediente)
+        : variante(leadId, textos.fechos.com_equipe);
 
   return `${abertura} ${fecho}`;
 }

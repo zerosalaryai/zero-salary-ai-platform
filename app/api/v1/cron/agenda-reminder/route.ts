@@ -1,3 +1,4 @@
+import { denyDemoAutomation } from "@/lib/channels/demo-inbound-only";
 /**
  * O LEMBRETE DO COMPROMISSO — o consumidor que faltava.
  *
@@ -251,6 +252,12 @@ export function degrausPendentes(input: {
 
 async function handle(req: NextRequest): Promise<Response> {
   const requestId = randomUUID();
+  try {
+    denyDemoAutomation();
+  } catch {
+    return fail("forbidden", "Demo automation is disabled.", 403, { requestId });
+  }
+
 
   const auth = req.headers.get("authorization") ?? "";
   const fornecido = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : "";

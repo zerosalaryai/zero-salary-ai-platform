@@ -14,6 +14,7 @@
  * Fonte: `channel_sessions.metadata.ai_gate`.
  *
  *   'open' (ausente / default)  → comportamento de hoje, nenhuma checagem nova.
+ *   'off' / valor desconhecido → bloqueia, mesmo com contato autorizado.
  *   'allowlist'                 → a IA só responde quando há uma condição
  *                                 POSITIVA de elegibilidade no contato.
  *
@@ -42,16 +43,17 @@ import {
 } from "./pre-go-live";
 
 /** Valores aceitos em `channel_sessions.metadata.ai_gate`. */
-export const AI_GATE_MODES = ["open", "allowlist"] as const;
+export const AI_GATE_MODES = ["open", "allowlist", "off"] as const;
 export type AiGateMode = (typeof AI_GATE_MODES)[number];
 
 /**
  * Normaliza o valor cru do jsonb para um modo conhecido. Ausente, `null`,
- * string desconhecida → `'open'` (o padrão seguro: não muda o comportamento de
- * quem nunca configurou nada).
+ * preservam `'open'` para canais legados. Valor explícito desconhecido falha
+ * fechado como `'off'`; só `'open'` e `'allowlist'` liberam seus modos.
  */
 export function lerModoDoGate(raw: unknown): AiGateMode {
-  return raw === "allowlist" ? "allowlist" : "open";
+  if (raw === undefined || raw === null || raw === "open") return "open";
+  return raw === "allowlist" ? "allowlist" : "off";
 }
 
 export interface EstadoDeElegibilidade {
@@ -77,6 +79,7 @@ export interface EstadoDeElegibilidade {
 
 export type MotivoDeElegibilidade =
   | "gate_aberto"
+  | "gate_desligado"
   | "force_human"
   | "conversa_silenciada"
   | "conversa_de_humano"
@@ -110,6 +113,10 @@ function silenciadoAgora(until: Date | number | null, agora: Date): boolean {
  * autorização positiva.
  */
 export function decidirElegibilidade(e: EstadoDeElegibilidade): DecisaoDeElegibilidade {
+  if (e.modo === "off") {
+    return { permite: false, motivo: "gate_desligado", bloqueioPorAllowlist: false };
+  }
+
   if (e.forceHuman) {
     return { permite: false, motivo: "force_human", bloqueioPorAllowlist: false };
   }
