@@ -21,13 +21,28 @@ const input = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
+/** Explicit public origin: never infer trust from proxy-controlled request headers. */
+function demoPublicOrigin(source: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = source.NEXT_PUBLIC_APP_URL;
+  if (!raw || raw !== raw.trim()) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
 /** Porta de autenticação explícita. Não aceita Server Actions nem outras mutações. */
 export async function POST(req: NextRequest): Promise<Response> {
   if (!readDemoWebConfig()) return fail("not_found", "not found", 404);
+  const publicOrigin = demoPublicOrigin();
   if (
+    !publicOrigin ||
     req.headers.has("next-action") ||
-    req.headers.get("origin") !== new URL(req.url).origin ||
-    !req.headers.get("content-type")?.startsWith("application/json")
+    req.headers.get("origin") !== publicOrigin ||
+    req.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
   )
     return fail("forbidden", "forbidden", 403);
   const parsed = input.safeParse(await req.json().catch(() => null));

@@ -43,6 +43,7 @@ beforeEach(() => {
   vi.stubEnv("DEMO_WEB_INGRESS_ONLY", "true");
   vi.stubEnv("DEMO_WEB_CHANNEL_ID", DEMO_WEB_CHANNEL);
   vi.stubEnv("DEMO_INBOUND_ONLY", "false");
+  vi.stubEnv("NEXT_PUBLIC_APP_URL", "https://demo.invalid");
   mocks.login.mockReset();
   mocks.mfa.mockReset();
   mocks.renew.mockReset();
@@ -100,6 +101,64 @@ it("TOTP keeps the existing verifier", async () => {
   );
   expect(response.status).toBe(200);
   expect(mocks.mfa).toHaveBeenCalledWith("123456", undefined);
+});
+const loginBody = JSON.stringify({
+  kind: "login",
+  credentials: { email: "unit@example.invalid", password: "unit-password" },
+});
+it("auth trusts the configured public origin despite an internal request URL", async () => {
+  mocks.login.mockResolvedValue({ ok: false, error: "invalid_credentials" });
+  const response = await auth(new NextRequest("http://localhost:3000/api/demo-web-auth", {
+    method: "POST",
+    headers: { origin: "https://demo.invalid", "content-type": "application/json; charset=utf-8" },
+    body: loginBody,
+  }));
+  expect(response.status).toBe(200);
+  expect(mocks.login).toHaveBeenCalledOnce();
+});
+it.each([undefined, "", "not-a-url", "http://demo.invalid", "https://demo.invalid/path",
+  "https://demo.invalid?query=1", "https://demo.invalid#fragment", "https://user:pass@demo.invalid",
+  " https://demo.invalid"])("auth fails closed on invalid public origin configuration: %s", async (value) => {
+  vi.stubEnv("NEXT_PUBLIC_APP_URL", value);
+  const response = await auth(new NextRequest("https://demo.invalid/api/demo-web-auth", {
+    method: "POST",
+    headers: { origin: "https://demo.invalid", "content-type": "application/json" },
+    body: loginBody,
+  }));
+  expect(response.status).toBe(403);
+  expect(mocks.login).not.toHaveBeenCalled();
+  expect(mocks.mfa).not.toHaveBeenCalled();
+});
+const unsafeAuthHeaders: Record<string, string>[] = [
+  { "content-type": "application/json" },
+  { origin: "null", "content-type": "application/json" },
+  { origin: "https://other.invalid", "content-type": "application/json" },
+  { origin: "http://localhost:3000", "content-type": "application/json" },
+  { origin: "https://demo.invalid:8443", "content-type": "application/json" },
+  { origin: "https://demo.invalid/", "content-type": "application/json" },
+  { origin: "https://demo.invalid", "content-type": "text/plain" },
+  { origin: "https://demo.invalid" },
+  { origin: "https://demo.invalid", "content-type": "application/json-spoof" },
+  { origin: "https://demo.invalid", "content-type": "application/json", "next-action": "" },
+  { origin: "https://other.invalid", "content-type": "application/json",
+    "x-forwarded-host": "demo.invalid", "x-forwarded-proto": "https" },
+];
+it.each(unsafeAuthHeaders)("auth rejects unsafe request metadata before authentication: %j", async (headers) => {
+  const response = await auth(new NextRequest("http://localhost:3000/api/demo-web-auth", {
+    method: "POST", headers, body: loginBody,
+  }));
+  expect(response.status).toBe(403);
+  expect(mocks.login).not.toHaveBeenCalled();
+  expect(mocks.mfa).not.toHaveBeenCalled();
+});
+it("auth remains unavailable outside demo mode", async () => {
+  vi.stubEnv("DEMO_WEB_INGRESS_ONLY", "false");
+  const response = await auth(new NextRequest("https://demo.invalid/api/demo-web-auth", {
+    method: "POST", headers: { origin: "https://demo.invalid", "content-type": "application/json" },
+    body: loginBody,
+  }));
+  expect(response.status).toBe(404);
+  expect(mocks.login).not.toHaveBeenCalled();
 });
 it("auth refuses foreign origin, action header and unknown auth operation", async () => {
   for (const [origin, action, body] of [

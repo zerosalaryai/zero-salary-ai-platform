@@ -33,7 +33,17 @@ export function LoginForm({ next, demoWeb = false }: { next?: string; demoWeb?: 
     startTransition(async () => {
       // Server Action redirects on success — no return value reaches here.
       // On failure, an error discriminator is returned and rendered inline.
-      const res = demoWeb ? await demoWebLogin<Awaited<ReturnType<typeof signInWithPassword>>>({kind:"login",credentials:values,next}) : await signInWithPassword(values, next);
+      let res: Awaited<ReturnType<typeof signInWithPassword>> | undefined;
+      if (demoWeb) {
+        try {
+          res = await demoWebLogin<Awaited<ReturnType<typeof signInWithPassword>>>({kind:"login",credentials:values,next});
+        } catch {
+          setServerError(t("Erro inesperado. Tente novamente."));
+          return;
+        }
+      } else {
+        res = await signInWithPassword(values, next);
+      }
       if (!res) {
         // Should be unreachable (redirect throws), but guard anyway.
         router.replace(next || "/app");

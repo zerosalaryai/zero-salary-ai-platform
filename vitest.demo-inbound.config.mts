@@ -23,6 +23,7 @@ export default defineConfig({
       DEMO_INBOUND_ONLY: "false",
     },
     include: [
+      "tests/unit/demo-web-login-form.test.tsx",
       "tests/unit/demo-inbox-read.test.ts",
       "tests/unit/aviso-de-escalacao-reply-language.test.ts",
       "tests/unit/demo-sender-scheduler.test.ts",
