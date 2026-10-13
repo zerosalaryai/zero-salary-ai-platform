@@ -52,6 +52,17 @@ export interface IdiomaRegistrado {
   readonly mantenedor: string | null;
 }
 
+/** Registro de apresentação da demo; não habilita seleção/persistência global. */
+export const IDIOMA_DEMO_WEB = {
+  codigo: "en-US",
+  nomeNativo: "English (US)",
+  rotuloCurto: "EN",
+  tagBcp47: "en-US",
+  subtagsDoNavegador: ["en"],
+  nivel: "completo",
+  mantenedor: "Zero Salary AI",
+} as const satisfies IdiomaRegistrado;
+
 export const REGISTRO_DE_IDIOMAS = [
   {
     codigo: "pt-BR",
@@ -113,6 +124,9 @@ export const IDIOMAS_EM_CONSTRUCAO: readonly IdiomaDoRegistro[] = REGISTRO_DE_ID
  * padrão do produto (a primeira linha do registro) é só a rede para um valor
  * que tenha escapado do tipo em tempo de execução — nunca uma tela quebrada.
  */
-export function idiomaVisivelPorCodigo(codigo: IdiomaVisivel["codigo"]): IdiomaVisivel {
+export function idiomaVisivelPorCodigo(
+  codigo: IdiomaVisivel["codigo"] | "en-US",
+): IdiomaVisivel | typeof IDIOMA_DEMO_WEB {
+  if (codigo === "en-US") return IDIOMA_DEMO_WEB;
   return IDIOMAS_VISIVEIS.find((idioma) => idioma.codigo === codigo) ?? REGISTRO_DE_IDIOMAS[0];
 }

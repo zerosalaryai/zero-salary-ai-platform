@@ -18,6 +18,7 @@ import {
 } from "@/components/app/ImpersonateBanner";
 import { ConexaoCaidaBanner } from "@/components/app/ConexaoCaidaBanner";
 import { IdiomaProvider } from "@/lib/i18n/IdiomaProvider";
+import { demoWebPresentation } from "@/lib/i18n/demo-web";
 import { listarConexoesCaidas, type ConexaoCaida } from "@/lib/channels/health";
 import { VoiceCallProvider } from "@/components/voice/VoiceCallContext";
 import { acessoFoiRevogado } from "@/lib/auth/vinculo-revogado";
@@ -198,11 +199,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     </VoiceCallProvider>
   );
 
-  return (
+  const conteudo = (
     // O idioma envolve a árvore inteira e recebe o código PRONTO — ele não
     // pergunta quem está logado. Ver `lib/i18n/IdiomaProvider`: foi o
     // acoplamento com a autenticação que derrubou 32 casos.
-    <IdiomaProvider locale={user.idioma}>
     <AuthProvider user={user} activeOrg={activeOrg}>
       <InterfaceRefresh userId={user.id} org={activeOrg} support={!!user.support} />
       {/*
@@ -234,6 +234,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         )}
       </div>
     </AuthProvider>
-    </IdiomaProvider>
+  );
+  const demoPresentation = demoWebPresentation();
+  return demoPresentation ? (
+    <IdiomaProvider locale={user.idioma} demoPresentation={demoPresentation}>{conteudo}</IdiomaProvider>
+  ) : (
+    <IdiomaProvider locale={user.idioma}>{conteudo}</IdiomaProvider>
   );
 }

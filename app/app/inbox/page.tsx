@@ -4,6 +4,7 @@ import Link from "next/link";
 import { loadAuthUser, resolveActiveOrg } from "@/lib/auth/server";
 import { InboxLayout } from "@/components/inbox/InboxLayout";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { idiomaDaDemoWeb } from "@/lib/i18n/demo-web";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Inbox" };
@@ -17,7 +18,7 @@ export default async function InboxPage({
   if (!user) redirect("/login");
   const activeOrg = await resolveActiveOrg(user);
   if (!activeOrg) {
-    const idioma = user.idioma;
+    const idioma = idiomaDaDemoWeb() ?? user.idioma;
     // As duas saídas que a frase anterior oferecia — "aceite um convite" e
     // "contate o admin" — não existem para quem INSTALOU o sistema: não há
     // convite e o admin é ele. Este é o estado terminal do primeiro acesso que

@@ -1,4 +1,4 @@
-import { es, ptBR } from "date-fns/locale";
+import { enUS, es, ptBR } from "date-fns/locale";
 import type { Locale } from "date-fns";
 
 import { IDIOMA_PADRAO, type Idioma } from "./idiomas";
@@ -26,13 +26,12 @@ import { idiomaVisivelPorCodigo } from "./registro";
  * correspondência visível e obriga quem acrescentar um idioma a decidir a
  * dupla — em vez de descobrir em produção que a data caiu no inglês.
  *
- * ─── O fallback é o padrão do produto, nunca o inglês ──────────────────────
+ * ─── O fallback é sempre o padrão do produto ──────────────────────────────
  *
- * Idioma desconhecido devolve português, que é o comportamento de antes desta
- * camada. `date-fns` sem `locale` cai no inglês, e uma tela em espanhol com
- * "Thursday" é o pior dos três mundos.
+ * Idioma desconhecido segue `IDIOMA_PADRAO`, mantendo a escolha centralizada.
  */
 const LOCALE_DE_DATA: Record<Idioma, Locale> = {
+  "en-US": enUS,
   "pt-BR": ptBR,
   es,
 };
@@ -50,9 +49,8 @@ export function localeDeData(idioma: Idioma): Locale {
  * navegador resolve pela região de quem lê — que é exatamente o que se quer
  * numa instalação que pode estar na Colômbia, no México ou na Argentina.
  *
- * Número não muda de forma entre `pt-BR` e `es` (ambos usam ponto para milhar
- * e vírgula para decimal), então passar por aqui não altera o que já aparece —
- * o ganho é não haver um segundo lugar onde o idioma está escrito à mão.
+ * A tag também controla separadores numéricos; inglês, português e espanhol
+ * precisam passar por esta mesma fonte para não misturar convenções na tela.
  */
 export function tagDeIdioma(idioma: Idioma): string {
   return idiomaVisivelPorCodigo(idioma).tagBcp47;

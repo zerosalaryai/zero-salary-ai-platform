@@ -2,6 +2,8 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
 import { traduzir } from "./dicionario";
+import { DEMO_WEB_CHANNEL } from "@/lib/channels/demo-web-ingress";
+import type { DemoWebPresentation } from "./demo-web";
 import { normalizarIdioma, IDIOMA_PADRAO, type Idioma } from "./idiomas";
 
 /**
@@ -60,12 +62,19 @@ export function idiomaAtual(): Idioma {
 
 export function IdiomaProvider({
   locale,
+  demoPresentation = null,
   children,
 }: {
   locale: string | null | undefined;
+  /** Prop serializada pelo layout servidor; nunca é um guard de autorização. */
+  demoPresentation?: DemoWebPresentation | null;
   children: React.ReactNode;
 }) {
-  const doServidor = normalizarIdioma(locale);
+  if (demoPresentation !== null && (
+    demoPresentation.channelId !== DEMO_WEB_CHANNEL || demoPresentation.locale !== "en-US"
+  )) throw new Error("invalid_demo_web_presentation");
+  const demo = demoPresentation !== null;
+  const doServidor: Idioma = demo ? "en-US" : normalizarIdioma(locale);
   const [idioma, setIdioma] = useState<Idioma>(doServidor);
 
   useEffect(() => {
@@ -84,7 +93,11 @@ export function IdiomaProvider({
     };
   }, [idioma]);
 
-  const valor = useMemo(() => ({ idioma, aplicar: setIdioma }), [idioma]);
+  const valor = useMemo(() => ({
+    idioma,
+    // Um clique local não habilita inglês fora da demo nem altera sua apresentação fixa.
+    aplicar: (novo: Idioma) => setIdioma(demo ? "en-US" : normalizarIdioma(novo)),
+  }), [idioma, demo]);
   return <Ctx.Provider value={valor}>{children}</Ctx.Provider>;
 }
 

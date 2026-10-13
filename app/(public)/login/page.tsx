@@ -5,6 +5,7 @@ import { LoginForm } from "@/components/auth/LoginForm";
 import { branding } from "@/lib/branding";
 import { createClient } from "@/lib/supabase/server";
 import { idiomaDoVisitante } from "@/lib/i18n/idiomaAnonimo";
+import { idiomaDaDemoWeb } from "@/lib/i18n/demo-web";
 import { traduzir } from "@/lib/i18n/dicionario";
 
 export const metadata = { title: "Entrar" };
@@ -23,7 +24,7 @@ export default async function LoginPage({
   const {
     data: { user },
   } = await supabase.auth.getUser();
-  const idioma = await idiomaDoVisitante(
+  const idioma = idiomaDaDemoWeb() ?? await idiomaDoVisitante(
     (user?.user_metadata?.locale as string | undefined) ?? null,
   );
   const t = (texto: string) => traduzir(texto, idioma);

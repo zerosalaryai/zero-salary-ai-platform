@@ -71,7 +71,7 @@ export function matchesExtensionFilter(
   identity: string[],
   query: string,
   category: CategoryFilter,
-  locale: "pt-BR" | "es",
+  locale: "pt-BR" | "es" | "en-US",
 ): boolean {
   if (category !== "all" && display.category !== category) return false;
   const needle = normalizedSearch(query.trim());

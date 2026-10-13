@@ -52,7 +52,8 @@ import { IDIOMAS_VISIVEIS, type IdiomaVisivel } from "./registro";
  * idioma `em_construcao` não entra aqui, então não é aceito na gravação, não é
  * servido na leitura e não é oferecido em tela nenhuma.
  */
-export type Idioma = IdiomaVisivel["codigo"];
+// Inglês existe apenas como apresentação explícita da demo; não entra em IDIOMAS.
+export type Idioma = IdiomaVisivel["codigo"] | "en-US";
 export const IDIOMAS: readonly Idioma[] = IDIOMAS_VISIVEIS.map((idioma) => idioma.codigo);
 
 export const IDIOMA_PADRAO: Idioma = "pt-BR";
@@ -61,7 +62,7 @@ export const IDIOMA_PADRAO: Idioma = "pt-BR";
  * O que veio do perfil é um idioma que sabemos servir?
  *
  * Fecha para o padrão em vez de confiar: o campo aceita qualquer string desde
- * antes desta feature (o seletor já ofereceu `en-US`, que nunca teve tradução),
+ * antes desta feature (o seletor já ofereceu códigos ainda sem tradução),
  * e um valor desconhecido chegando ao dicionário devolveria a CHAVE na tela.
  */
 export function normalizarIdioma(bruto: string | null | undefined): Idioma {

@@ -33,6 +33,10 @@
  */
 import type { Idioma } from "./idiomas";
 
+// A apresentação explícita em inglês carrega o catálogo sob demanda.
+// Tipagem por chave omitida para não inflar o heap do TypeScript.
+let enUS: Record<string, string> | undefined;
+
 /** `pt-BR` não aparece: é a chave. Só o que DIFERE precisa de linha. */
 type Traducoes = Record<string, Partial<Record<Exclude<Idioma, "pt-BR">, string>>>;
 
@@ -10099,5 +10103,11 @@ export const DICIONARIO: Traducoes = {
  */
 export function traduzir(texto: string, idioma: Idioma): string {
   if (idioma === "pt-BR") return texto;
+  if (idioma === "en-US") {
+    // Literal estático para o bundler; não há import remoto nem caminho do usuário.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const catalogo = (enUS ??= require("./traducoes/en-US.json") as Record<string, string>);
+    return catalogo[texto] ?? texto;
+  }
   return DICIONARIO[texto]?.[idioma] ?? texto;
 }
