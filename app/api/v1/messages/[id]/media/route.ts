@@ -22,6 +22,11 @@ import {
 } from "@/lib/channels";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { z } from "zod";
+import { ApiError } from "@/lib/api/types";
+import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
+import { readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
+import { storagePathFor } from "@/lib/messaging/media/types";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +53,54 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const activeOrg = authUser ? await resolveActiveOrg(authUser) : null;
   if (!activeOrg) {
     return fail("no_active_org", t("No active organization."), 403, { requestId });
+  }
+
+  if (readDemoWebConfig()) {
+    try {
+      if (!z.uuid().safeParse(messageId).success || authUser?.support || authUser?.id !== user.id)
+        return fail("forbidden", "Media access denied.", 403, { requestId });
+      const channel = await demoInboxReadChannel(supabase, {
+        organization_id: activeOrg.orgId, actor: { type: "user", id: user.id }, requestId,
+      });
+      if (!channel) return fail("forbidden", "Media access denied.", 403, { requestId });
+      const { data: message, error: messageError } = await supabase.from("messages")
+        .select("id, conversation_id, contact_id, media_storage_path, media_mime, media_size_bytes, revoked_at")
+        .eq("id", messageId).eq("organization_id", activeOrg.orgId)
+        .eq("channel_session_id", channel).maybeSingle();
+      if (messageError) return fail("internal_error", "Media lookup failed.", 500, { requestId });
+      if (!message || message.revoked_at || !message.media_storage_path ||
+          !z.uuid().safeParse(message.conversation_id).success || !z.uuid().safeParse(message.contact_id).success)
+        return fail("not_found", "Stored media unavailable.", 404, { requestId });
+      const { data: conversation, error: conversationError } = await supabase.from("conversations")
+        .select("id").eq("id", message.conversation_id).eq("contact_id", message.contact_id)
+        .eq("organization_id", activeOrg.orgId).eq("channel_session_id", channel).maybeSingle();
+      const { data: contact, error: contactError } = await supabase.from("contacts")
+        .select("id").eq("id", message.contact_id).eq("organization_id", activeOrg.orgId).maybeSingle();
+      if (conversationError || contactError)
+        return fail("internal_error", "Media lookup failed.", 500, { requestId });
+      const mime = message.media_mime?.split(";")[0]?.trim().toLowerCase();
+      // Never fetch transport URLs or sign arbitrary stored paths in demo mode.
+      // Bound memory usage and prohibit active document types from rendering inline.
+      const inline = /^(image\/(jpeg|png|gif|webp)|audio\/(ogg|mpeg|mp4|wav|webm)|video\/(mp4|webm))$/;
+      if (!conversation || !contact || !mime ||
+          message.media_storage_path !== storagePathFor(activeOrg.orgId, message.conversation_id, messageId, mime) ||
+          !Number.isFinite(message.media_size_bytes) || message.media_size_bytes! <= 0 || message.media_size_bytes! > 25 * 1024 * 1024)
+        return fail("not_found", "Stored media unavailable.", 404, { requestId });
+      // Session client retains Storage RLS; no service-role signing or redirect.
+      const { data: blob, error: downloadError } = await supabase.storage.from("whatsapp-media").download(message.media_storage_path);
+      if (downloadError || !blob || blob.size !== message.media_size_bytes)
+        return fail("not_found", "Stored media unavailable.", 404, { requestId });
+      return new Response(blob, { headers: {
+        "Content-Type": inline.test(mime) ? mime : "application/octet-stream",
+        "Content-Disposition": inline.test(mime) ? "inline" : "attachment",
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Request-Id": requestId,
+      } });
+    } catch (err) {
+      if (err instanceof ApiError) return fail(err.code, err.message, err.status, { requestId });
+      return fail("forbidden", "Media access denied.", 403, { requestId });
+    }
   }
 
   // Client de sessão: RLS garante que a mensagem pertence a uma org do usuário.

@@ -10,12 +10,15 @@ import type { Message } from "@/lib/types/messaging";
 import { CitationButton } from "@/components/ai/CitationButton";
 import { MediaRenderer } from "@/components/inbox/media/MediaRenderer";
 import { ContactCard } from "@/components/inbox/media/ContactCard";
+import { resolveSharedContact } from "@/lib/messaging/contact-card";
 import {
   extractCitations,
   isAiGeneratedMessage,
 } from "@/lib/ai/citations/types";
 
 interface Props {
+  /** Sem resposta, citações operacionais ou abertura mutante de contato. */
+  readOnly?: boolean;
   message: Message;
   debugCitations?: boolean;
   /** Escolher esta mensagem para responder "em cima" dela. */
@@ -49,18 +52,20 @@ function AckIndicator({ status, t }: { status: string; t: (texto: string) => str
 }
 
 export function MessageBubble({
+  readOnly = false,
   message,
   debugCitations,
-  onResponder,
+  onResponder: responder,
   citada,
   viewerUserId,
 }: Props) {
+  const onResponder = readOnly ? undefined : responder;
   const localeDaData = useLocaleDeData();
   const t = useT();
   const isOutbound = message.direction === "outbound";
   const time = format(new Date(message.sent_at), "HH:mm", { locale: localeDaData });
   const isFailed = message.status === "failed";
-  const hasMedia = Boolean(message.media_url || message.media_storage_path);
+  const hasMedia = Boolean(message.media_storage_path || (!readOnly && message.media_url));
   const isContact = message.type === "contact";
   // Figurinha sem caption: sem moldura de bolha (padrão WhatsApp).
   const isBareSticker = hasMedia && message.type === "sticker" && !message.body;
@@ -73,7 +78,7 @@ export function MessageBubble({
   const aiGenerated = isAiGeneratedMessage(message.metadata);
   const citations = extractCitations(message.metadata);
   const showCitationButton =
-    isOutbound && aiGenerated && (debugCitations ?? false);
+    !readOnly && isOutbound && aiGenerated && (debugCitations ?? false);
   // De quem saiu esta linha. `external_device` é a resposta pelo CELULAR — o
   // operador atendeu pelo WhatsApp do telefone, fora do CRM, e o ingest carimba
   // aqui. Antes isto voltava null para tudo que não fosse IA, e a bolha ficava
@@ -227,12 +232,15 @@ export function MessageBubble({
 
             {isContact && !hasMedia && (
               <div className={cn(message.body && isContact && "mb-1")}>
-                <ContactCard message={message} />
+                {readOnly ? <p className="whitespace-pre-wrap">{resolveSharedContact(message)?.name ?? t("Contato")}{" "}{resolveSharedContact(message)?.phone_number}</p> : <ContactCard message={message} />}
               </div>
             )}
 
             {message.body && !isContact && (
               <p className="whitespace-pre-wrap break-words leading-snug">{message.body}</p>
+            )}
+            {readOnly && !hasMedia && !isContact && message.type !== "text" && (
+              <p className="text-xs">Stored media unavailable.</p>
             )}
           </>
         )}

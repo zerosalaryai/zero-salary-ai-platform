@@ -32,6 +32,9 @@ export function demoWebRequestAllowed(
   if (serverAction) return false;
   if (/^\/api\/v1\/webhooks\/meta\/[^/]+$/.test(path)) return method === "GET" || method === "POST";
   if (path === "/api/demo-web-auth") return method === "POST";
+  // Stored media only; the handler revalidates session, tenant, channel and object path.
+  if (/^\/api\/v1\/messages\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/media$/i.test(path))
+    return method === "GET";
   if (path === "/api/v1/conversations" ||
       /^\/api\/v1\/conversations\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/messages)?$/i.test(path))
     return method === "GET"; // Os handlers reconferem auth, tenant e canal.

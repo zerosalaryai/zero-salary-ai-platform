@@ -16,6 +16,8 @@ import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { phoneForDisplay } from "@/lib/channels/phone-variants";
 
 interface Props {
+  /** Leitura restrita: não montar o endpoint auxiliar de avatar. */
+  showAvatarImage?: boolean;
   conversation: ConversationWithContact;
   isSelected: boolean;
   onSelect: (id: string) => void;
@@ -119,6 +121,7 @@ function waitingLabel(
 }
 
 export function ConversationListItem({
+  showAvatarImage = true,
   conversation,
   isSelected,
   onSelect,
@@ -218,7 +221,7 @@ export function ConversationListItem({
               a rota para TODO contato da lista e levaria 404 em cada um sem
               foto — que é a maioria. O AvatarFallback do Radix já cobre o caso
               de a imagem não carregar, então as iniciais nunca somem. */}
-          {c?.avatar_storage_path && !c?.is_anonymized ? (
+          {showAvatarImage && c?.avatar_storage_path && !c?.is_anonymized ? (
             <AvatarImage
               src={`/api/v1/contacts/${c.id}/avatar`}
               alt=""

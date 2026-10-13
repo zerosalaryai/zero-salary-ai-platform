@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IdiomaProvider } from "@/lib/i18n/IdiomaProvider";
 import { DEMO_WEB_CHANNEL } from "@/lib/channels/demo-web-ingress";
 import { ApiError } from "@/lib/api/types";
+import { MessageBubble } from "@/components/inbox/MessageBubble";
 import { InboxLayout } from "@/components/inbox/InboxLayout";
 import { SeletorDeIdioma } from "@/components/shell/SeletorDeIdioma";
 import { AppShell } from "@/app/app/_components/AppShell";
@@ -48,8 +49,8 @@ vi.mock("@/components/inbox/CRMSidePanel", () => ({ CRMSidePanel: () => null }))
 vi.mock("@/components/inbox/InboxKeyboardShortcuts", () => ({ InboxKeyboardShortcuts: () => null }));
 vi.mock("@/components/inbox/ShortcutsHelpDialog", () => ({ ShortcutsHelpDialog: () => null }));
 const id = "20000000-0000-4000-8000-000000000001", contact = "30000000-0000-4000-8000-000000000001";
-const conversation = () => ({ id, contact_id: contact, organization_id: f.org, channel_session_id: DEMO_WEB_CHANNEL, contacts: { name: "Synthetic customer" } });
-const message = (n: number, inbound = true) => ({ id: `m${n}`, conversation_id: id, contact_id: contact, organization_id: f.org, channel_session_id: DEMO_WEB_CHANNEL, direction: inbound ? "inbound" : "outbound", sent_via: inbound ? "external_device" : "ai", sent_at: `2026-10-13T10:00:0${n}Z`, body: inbound ? "Customer text" : "Stored Worker reply", status: "sent", type: "text" });
+const conversation = () => ({ id, contact_id: contact, organization_id: f.org, channel_session_id: DEMO_WEB_CHANNEL, status: "open", tags: [], contacts: { name: "Synthetic customer", phone_number: "+15550000001", tags: ["Demo lead"], avatar_storage_path: "unused-avatar", force_human: true, is_blocked: true } });
+const message = (n: number, inbound = true) => ({ id: `m${n}`, conversation_id: id, contact_id: contact, organization_id: f.org, channel_session_id: DEMO_WEB_CHANNEL, direction: inbound ? "inbound" : "outbound", sent_via: inbound ? "external_device" : "ai", sent_at: `2026-10-13T10:00:0${n}Z`, body: inbound ? "Customer text" : "Stored Worker reply", status: "sent", type: "text", metadata: {} });
 function mount(children: React.ReactNode, demo = true) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   return render(<IdiomaProvider locale="pt-BR" demoPresentation={demo ? { channelId: DEMO_WEB_CHANNEL, locale: "en-US" } : null}><QueryClientProvider client={qc}>{children}</QueryClientProvider></IdiomaProvider>);
@@ -100,6 +101,50 @@ describe("isolated demo viewer", () => {
     mount(<InboxLayout initialSelectedId={id} />);
     await screen.findByText("Conversation unavailable or outside your access.");
     expect(f.get.mock.calls.some(([p]) => p.includes("messages"))).toBe(false);
+  });
+  it("restores conversation presentation and available lead details without auxiliary APIs", async () => {
+    mount(<InboxLayout initialSelectedId={id} />);
+    await screen.findByText("Stored Worker reply");
+    const panel = screen.getByRole("complementary", { name: "Lead details" });
+    expect(panel.textContent).toContain("+15550000001");
+    expect(panel.textContent).toContain("Demo lead");
+    expect(panel.textContent).toContain("Contact blocked");
+    expect(panel.textContent).toContain("Human takeover enabled");
+    expect(screen.getByRole("list", {name: "Message history"})).toBeTruthy();
+    expect(document.querySelector('img[src*="/avatar"]')).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(f.alerts).not.toHaveBeenCalled();
+  });
+  it("uses existing stored-media renderers, with no transport URLs or contact-opening mutation", () => {
+    const base = message(1);
+    const m = {...base, type: "image", media_storage_path: "stored", media_url: "https://forbidden.invalid/media"};
+    mount(<MessageBubble message={m as never} readOnly />);
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("/api/v1/messages/m1/media");
+    expect(document.querySelector('img[src*="forbidden"]')).toBeNull();
+    expect(screen.queryByRole("button", {name: /Reply/})).toBeNull();
+  });
+  it("does not request unstored media and renders shared contacts without a write action", () => {
+    const {unmount} = mount(<MessageBubble readOnly message={{...message(1), type: "audio", media_url: "meta-media:synthetic", media_storage_path: null} as never} />);
+    expect(document.querySelector("audio")).toBeNull();
+    expect(screen.getByText("Stored media unavailable.")).toBeTruthy();
+    unmount();
+    mount(<MessageBubble readOnly message={{...message(1), type: "contact", metadata: {shared_contact: {name: "Shared synthetic lead", phone_number: "+15550000002"}}} as never} />);
+    expect(screen.getByText(/Shared synthetic lead/)).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(f.get).not.toHaveBeenCalled();
+  });
+  it("retains ordinary message reply controls outside read-only mode", () => {
+    const reply = vi.fn(); mount(<MessageBubble message={message(1) as never} onResponder={reply} />, false);
+    fireEvent.click(screen.getByRole("button", {name: /Responder/})); expect(reply).toHaveBeenCalledTimes(1);
+  });
+  it("loads older history only through the scoped messages endpoint", async () => {
+    f.get.mockImplementation(async (p: string) => p.includes("/messages") ?
+      p.includes("cursor=older") ? {data: [{...message(1), id: "old", body: "Older stored message", sent_at: "2026-10-12T10:00:00Z"}]} :
+        {data: [message(2, false)], meta: {has_more: true, cursor: "older"}} : p.includes(id) ? {data: conversation()} : {data: [conversation()]});
+    mount(<InboxLayout initialSelectedId={id} />);
+    fireEvent.click(await screen.findByText("Older messages")); await screen.findByText("Older stored message");
+    expect(screen.getAllByRole("listitem")[0]?.textContent).toContain("Older stored message");
+    expect(f.get.mock.calls.every(([p]) => p.startsWith("/api/v1/conversations"))).toBe(true);
   });
   it("rejects cross-channel message data", async () => {
     f.get.mockImplementation(async (p: string) => p.includes("messages") ? { data: [{ ...message(1), channel_session_id: "other" }] } : p.includes(id) ? { data: conversation() } : { data: [conversation()] });
