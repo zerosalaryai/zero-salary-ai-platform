@@ -20,6 +20,8 @@ import {
 } from "@/hooks/inbox/useConversationsRealtime";
 import { useConversation, isNotFound } from "@/hooks/inbox/useConversation";
 import { ConversationList } from "./ConversationList";
+import { ConversationListItem } from "./ConversationListItem";
+import { MessageBubble } from "./MessageBubble";
 import { InboxFilters, type InboxFiltersValue, type InboxTab } from "./InboxFilters";
 import { ChatThread } from "./ChatThread";
 import { Composer, type ComposerHandle } from "./Composer";
@@ -625,34 +627,52 @@ function DemoInbox({ initialSelectedId = null }: InboxLayoutProps) {
   if (!eligible) return <p role="alert">An authenticated organization is required.</p>;
   return <section aria-label="Read-only demo Inbox" className="space-y-3">
     <p>Read-only viewer. Messages appear when stored by the channel or Worker; this view does not send replies.</p>
-    <div className="grid gap-4 md:grid-cols-[minmax(12rem,1fr)_2fr]">
+    <div className="grid min-h-[32rem] gap-4 md:grid-cols-[minmax(14rem,1fr)_2fr] xl:grid-cols-[minmax(14rem,1fr)_2fr_minmax(12rem,1fr)]">
       <nav aria-label="Conversations" className="space-y-2">
         {list.isPending ? <p role="status">Loading conversations…</p> : list.isError ?
           <p role="alert">Unable to load conversations. Your session or access may have changed.</p> : <>
             {!conversations.length && <p>No conversations yet.</p>}
-            {conversations.map(c => <button key={c.id} type="button" aria-pressed={selected === c.id}
-              className="block w-full rounded border p-2 text-left" onClick={() => setSelected(c.id)}>
-              {c.contacts?.display_name || c.contacts?.name || "Customer"}
-            </button>)}
+            {conversations.map(c => <ConversationListItem key={c.id} conversation={c}
+              isSelected={selected === c.id} onSelect={setSelected} showAvatarImage={false} />)}
             {list.hasNextPage && <button disabled={list.isFetching} onClick={() => { void list.fetchNextPage({ cancelRefetch: false }); }}>More conversations</button>}
           </>}
       </nav>
-      <div aria-label="Conversation messages" className="space-y-3">
+      <div aria-label="Conversation messages" className="min-w-0 rounded border bg-muted/20">
+        {detail.data && !detail.isError && <header className="border-b p-4">
+          <h2 className="font-semibold">{detail.data.contacts?.display_name || detail.data.contacts?.name || "Customer"}</h2>
+          <p className="text-sm text-muted-foreground">0230 · Read-only conversation</p>
+        </header>}
         {!selected ? <p>Select a conversation.</p> : !selectedValid ? <p role="alert">Invalid conversation.</p> :
           detail.isError ? <p role="alert">Conversation unavailable or outside your access.</p> :
           detail.isPending || messages.isPending ? <p role="status">Loading messages…</p> :
           messages.isError ? <p role="alert">Unable to load messages. Your session or access may have changed.</p> : <>
             {!ordered.length && <p>No messages yet.</p>}
             {messages.hasNextPage && <button disabled={messages.isFetching} onClick={() => { void messages.fetchNextPage({ cancelRefetch: false }); }}>Older messages</button>}
-            <ol className="space-y-3">{ordered.map(m => <li key={m.id} className="rounded border p-3">
-              <p className="text-xs font-semibold">{m.direction === "inbound" ? "Customer" :
-                m.sent_via === "ai" ? "AI reply" : m.sent_via === "user" || m.sent_via === "crm" ? "Human reply" : "Outbound message"}
-                {" · "}<time dateTime={m.sent_at}>{new Date(m.sent_at).toLocaleString("en-US")}</time>
-                {" · "}{m.status}</p>
-              <p className="whitespace-pre-wrap break-words">{m.revoked_at ? "Message deleted" : m.body || `[${m.type} message — media unavailable in this viewer]`}</p>
+            <ol aria-label="Message history" className="max-h-[65vh] overflow-y-auto py-3">{ordered.map((m, index) => <li key={m.id}>
+              {(index === 0 || ordered[index - 1]?.sent_at.slice(0, 10) !== m.sent_at.slice(0, 10)) &&
+                <p className="my-3 text-center text-xs"><time dateTime={m.sent_at.slice(0, 10)}>{new Date(m.sent_at).toLocaleDateString("en-US", { timeZone: "UTC", dateStyle: "long" })}</time></p>}
+              <p className={cn("px-4 text-xs text-muted-foreground", m.direction === "outbound" && "text-right")}>
+                {m.direction === "inbound" ? "Customer" : m.sent_via === "ai" ? "AI reply" :
+                  m.sent_via === "user" || m.sent_via === "crm" ? "Human reply" : "Outbound message"}
+              </p>
+              <MessageBubble message={m} readOnly viewerUserId={user.id}
+                citada={m.reply_to_message_id ? ordered.find(item => item.id === m.reply_to_message_id) : null} />
             </li>)}</ol>
           </>}
       </div>
+      {detail.data && !detail.isError && <aside aria-label="Lead details" className="space-y-3 rounded border p-4">
+        <h2 className="font-semibold">Lead details</h2>
+        <dl className="space-y-2 text-sm">
+          <div><dt className="text-muted-foreground">Name</dt><dd>{detail.data.contacts?.display_name || detail.data.contacts?.name || "Not available"}</dd></div>
+          <div><dt className="text-muted-foreground">Phone</dt><dd>{detail.data.contacts?.is_anonymized ? "Not available" : detail.data.contacts?.phone_number || "Not available"}</dd></div>
+          <div><dt className="text-muted-foreground">Status</dt><dd>{detail.data.status || "Not available"}</dd></div>
+          <div><dt className="text-muted-foreground">Assigned attendant</dt><dd>{detail.data.assigned_to_user_name || (detail.data.assigned_to_user_id ? "Name unavailable" : "Unassigned")}</dd></div>
+          <div><dt className="text-muted-foreground">Tags</dt><dd>{detail.data.contacts?.tags?.join(", ") || "None"}</dd></div>
+        </dl>
+        {detail.data.contacts?.is_blocked && <p>Contact blocked</p>}
+        {detail.data.contacts?.force_human && <p>Human takeover enabled</p>}
+        <p className="text-xs text-muted-foreground">Only details returned by the authorized conversation are shown. Sending and CRM changes are disabled.</p>
+      </aside>}
     </div>
   </section>;
 }
