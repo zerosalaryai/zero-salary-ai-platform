@@ -39,6 +39,10 @@ import { normalizarIdioma, IDIOMA_PADRAO, type Idioma } from "./idiomas";
  * essa reconciliação o estado local venceria para sempre e uma gravação que
  * FALHOU continuaria parecendo aplicada.
  */
+// Somente apresentação derivada do layout servidor; não autoriza dados/ações.
+const DemoCtx = createContext(false);
+export function useDemoWebPresentation(): boolean { return useContext(DemoCtx); }
+
 const Ctx = createContext<{ idioma: Idioma; aplicar: (i: Idioma) => void }>({
   idioma: IDIOMA_PADRAO,
   aplicar: () => {},
@@ -98,7 +102,7 @@ export function IdiomaProvider({
     // Um clique local não habilita inglês fora da demo nem altera sua apresentação fixa.
     aplicar: (novo: Idioma) => setIdioma(demo ? "en-US" : normalizarIdioma(novo)),
   }), [idioma, demo]);
-  return <Ctx.Provider value={valor}>{children}</Ctx.Provider>;
+  return <DemoCtx.Provider value={demo}><Ctx.Provider value={valor}>{children}</Ctx.Provider></DemoCtx.Provider>;
 }
 
 /** `t("Assumir")` → "Asumir" para quem escolheu espanhol. */

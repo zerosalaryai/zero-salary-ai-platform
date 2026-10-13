@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useT } from "@/hooks/i18n/useT";
-import { useAplicarIdioma, useIdioma } from "@/lib/i18n/IdiomaProvider";
+import { useAplicarIdioma, useIdioma, useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { type Idioma } from "@/lib/i18n/idiomas";
 import { IDIOMAS_VISIVEIS, idiomaVisivelPorCodigo } from "@/lib/i18n/registro";
 import { Check } from "@/lib/ui/icons";
@@ -36,6 +36,11 @@ import { Check } from "@/lib/ui/icons";
  */
 
 export function SeletorDeIdioma() {
+  const demo = useDemoWebPresentation();
+  return demo ? <span aria-label="Language: English" data-testid="seletor-de-idioma" className="px-2 text-xs font-semibold">EN</span> : <SeletorNormal />;
+}
+
+function SeletorNormal() {
   const t = useT();
   const idioma = useIdioma();
   const emVigor = idiomaVisivelPorCodigo(idioma);

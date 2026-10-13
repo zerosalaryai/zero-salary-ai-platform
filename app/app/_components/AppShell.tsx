@@ -1,4 +1,6 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
+import { UserMenu } from "@/components/shell/UserMenu";
 import type { ReactNode } from "react";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
@@ -23,6 +25,15 @@ interface AppShellProps {
 }
 
 export function AppShell({ sidebarCollapsed, podeAtender, children }: AppShellProps) {
+  const demo = useDemoWebPresentation();
+  return demo ? (
+    <div className="flex min-h-screen flex-col">
+      <header className="flex items-center justify-between border-b p-3"><span>Inbox · Read-only demo</span><UserMenu /></header>
+      <main className="min-h-0 flex-1 p-3">{children}</main>
+    </div>
+  ) : <NormalAppShell sidebarCollapsed={sidebarCollapsed} podeAtender={podeAtender}>{children}</NormalAppShell>;
+}
+function NormalAppShell({ sidebarCollapsed, podeAtender, children }: AppShellProps) {
   useInboundMessageAlerts();
   useCrmAlerts();
   useNotifyOpenFromServiceWorker();

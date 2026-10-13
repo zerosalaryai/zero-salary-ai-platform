@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import Link from "next/link";
 import { useAuth } from "@/hooks/auth/AuthProvider";
 import { destinosDaInterface } from "@/lib/navigation/interface";
@@ -12,6 +13,10 @@ import { Bell } from "@/lib/ui/icons";
  * do runtime do agente no header; clique leva a /app/ai/inbox.
  */
 export function AlertsBell() {
+  const demo = useDemoWebPresentation();
+  return demo ? null : <NormalAlertsBell />;
+}
+function NormalAlertsBell() {
   const { user, activeOrg } = useAuth();
   if (
     !destinosDaInterface(

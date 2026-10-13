@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { createContext, useContext, useRef, type ReactNode } from "react";
 
 import { useVoiceCallSession } from "@/hooks/voice/useVoiceCallSession";
@@ -22,6 +23,10 @@ const VoiceCallCtx = createContext<VoiceCallSession | null>(null);
  * analisador, mas a separação é a correção limpa, não a supressão).
  */
 export function VoiceCallProvider({ children }: { children: ReactNode }) {
+  const demo = useDemoWebPresentation();
+  return demo ? <>{children}</> : <NormalVoiceCallProvider>{children}</NormalVoiceCallProvider>;
+}
+function NormalVoiceCallProvider({ children }: { children: ReactNode }) {
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const session = useVoiceCallSession(remoteAudioRef);
   const { call, minha } = session;

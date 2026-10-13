@@ -8,6 +8,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
+import { demoWebLogin } from "@/lib/auth/demo-web-login";
 import { Providers } from "@/app/providers";
 import { createClient, resetRealtimeAuthentication } from "@/lib/supabase/browser";
 import type { AuthUser, ActiveOrg, Role } from "@/lib/auth/types";
@@ -32,8 +34,10 @@ export function AuthProvider({
   activeOrg: ActiveOrg | null;
   children: ReactNode;
 }) {
+  const demo = useDemoWebPresentation();
   const [refreshing, setRefreshing] = useState(false);
-  const supabaseRef = useRef(createClient());
+  const [authError, setAuthError] = useState<string | null>(null);
+  const supabaseRef = useRef(demo ? null : createClient());
 
   useEffect(() => {
     resetRealtimeAuthentication();
@@ -42,7 +46,7 @@ export function AuthProvider({
 
   // Revogação/scope no banco também derrubam o snapshot aberto de UI/realtime.
   useEffect(() => {
-    if (!user.support) return;
+    if (demo || !user.support) return;
     const expected = `${user.support.id}:${user.support.access_mode}:${user.support.status}`;
     const check = async () => {
       const response = await fetch("/api/v1/auth/support", { cache: "no-store" }).catch(() => null);
@@ -52,23 +56,33 @@ export function AuthProvider({
     };
     const timer = setInterval(() => { void check(); }, 15000);
     return () => clearInterval(timer);
-  }, [user.support]);
+  }, [user.support, demo]);
 
   // Refresh session every 40 minutes (JWT default 1h, with margin).
   useEffect(() => {
+    let inFlight = false;
+    let disposed = false;
     const interval = setInterval(
       async () => {
+        if (inFlight) return;
+        inFlight = true;
         setRefreshing(true);
         try {
-          await supabaseRef.current.auth.refreshSession();
+          if (demo) await demoWebLogin({ kind: "refresh" });
+          else await supabaseRef.current?.auth.refreshSession();
+        } catch (error) {
+          if (!demo) throw error;
+          // Re-enter the server-validated login/MFA flow; never retry in a loop.
+          if (demo && !disposed) window.location.assign("/login?next=%2Fapp%2Finbox");
         } finally {
-          setRefreshing(false);
+          inFlight = false;
+          if (!disposed) setRefreshing(false);
         }
       },
       40 * 60 * 1000,
     );
-    return () => clearInterval(interval);
-  }, []);
+    return () => { disposed = true; clearInterval(interval); };
+  }, [demo]);
 
   const value = useMemo<AuthCtx>(
     () => ({
@@ -78,15 +92,25 @@ export function AuthProvider({
       refreshing,
       signOut: async () => {
         resetRealtimeAuthentication();
+        if (demo) {
+          setAuthError(null);
+          try { await demoWebLogin({ kind: "logout" }); }
+          catch { setAuthError("Unable to sign out. Please try again."); }
+          return;
+        }
         const { signOut } = await import("@/app/actions/auth/signOut");
         await signOut();
       },
     }),
-    [user, activeOrg, refreshing],
+    [user, activeOrg, refreshing, demo],
   );
 
+  // Acompanhamento administrativo não é uma sessão suportada pela demo.
+  // Não renderiza seus controles; autenticação/refresh/logout normais ficam intactos.
+  if (demo && user.support) return <p role="alert">Use a normal authenticated account to view this demo.</p>;
+
   return <Ctx.Provider value={value}>
-    <Providers key={`${user.id}:${activeOrg?.orgId ?? "none"}:${user.support?.id ?? "normal"}:${user.support?.access_mode ?? ""}`}>{children}</Providers>
+    <Providers key={`${user.id}:${activeOrg?.orgId ?? "none"}:${user.support?.id ?? "normal"}:${user.support?.access_mode ?? ""}`}>{authError && <p role="alert">{authError}</p>}{children}</Providers>
   </Ctx.Provider>;
 }
 

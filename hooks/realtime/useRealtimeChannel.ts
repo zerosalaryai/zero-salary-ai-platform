@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { createClient, prepareRealtimeAuthentication } from "@/lib/supabase/browser";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -68,7 +69,9 @@ export function useRealtimeChannel(opts: UseRealtimeChannelOpts): {
    */
   ultimaEntrega: RefObject<number | null>;
 } {
-  const { name, postgresChanges, broadcast, onChange, enabled = true } = opts;
+  const demo = useDemoWebPresentation();
+  const { name, postgresChanges, broadcast, onChange } = opts;
+  const enabled = (opts.enabled ?? true) && !demo;
 
   // ref makes onChange identity-stable so changing handler doesn't re-subscribe
   const onChangeRef = useRef(onChange);

@@ -1,4 +1,9 @@
 "use client";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api/client";
+import { ApiError } from "@/lib/api/types";
+import { DEMO_WEB_CHANNEL } from "@/lib/channels/demo-web-ingress";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/hooks/i18n/useT";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -123,7 +128,11 @@ interface InboxLayoutProps {
   initialSelectedId?: string | null;
 }
 
-export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {}) {
+export function InboxLayout(props: InboxLayoutProps = {}) {
+  const demo = useDemoWebPresentation();
+  return demo ? <DemoInbox key={props.initialSelectedId ?? "list"} {...props} /> : <NormalInboxLayout {...props} />;
+}
+function NormalInboxLayout({ initialSelectedId = null }: InboxLayoutProps = {}) {
   const t = useT();
   const { activeOrg, user } = useAuth();
   const supportReadonly = user.support?.access_mode === "support_readonly";
@@ -550,4 +559,100 @@ export function InboxLayout({ initialSelectedId = null }: InboxLayoutProps = {})
     </div>
     </OpenConversationProvider>
   );
+}
+
+// Não monta nenhum filho do Inbox operacional. O servidor continua sendo a
+// autoridade de sessão/tenant/canal; estas conferências só evitam exibir um
+// resultado inconsistente ou reaproveitar cache de outra organização.
+const DEMO_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const demoPolling = (query: { state: { error: Error | null } }) =>
+  query.state.error instanceof ApiError && [401, 403, 404].includes(query.state.error.status)
+    ? false as const : 15_000;
+type DemoPage<T> = { data: T[]; meta?: { cursor?: string | null; has_more?: boolean } };
+
+function DemoInbox({ initialSelectedId = null }: InboxLayoutProps) {
+  const { activeOrg, user } = useAuth();
+  const org = activeOrg?.orgId;
+  const [selected, setSelected] = useState(initialSelectedId);
+  const eligible = Boolean(org && !user.support);
+  const selectedValid = Boolean(selected && DEMO_UUID.test(selected));
+  const checkedConversation = (c: ConversationWithContact) => {
+    if (c.organization_id !== org || c.channel_session_id !== DEMO_WEB_CHANNEL || !DEMO_UUID.test(c.id))
+      throw new Error("Conversation access could not be verified.");
+    return c;
+  };
+  const list = useInfiniteQuery({
+    queryKey: ["demo-inbox", user.id, org, "list"], enabled: eligible,
+    initialPageParam: undefined as string | undefined, retry: false,
+    refetchInterval: demoPolling, refetchIntervalInBackground: false, refetchOnWindowFocus: false,
+    queryFn: async ({ pageParam, signal }) => {
+      const qs = new URLSearchParams({ channel_session_id: DEMO_WEB_CHANNEL, limit: "50" });
+      if (pageParam) qs.set("cursor", pageParam);
+      const page = await apiClient.get<DemoPage<ConversationWithContact>>(`/api/v1/conversations?${qs}`, { signal });
+      page.data.forEach(checkedConversation);
+      return page;
+    },
+    getNextPageParam: (page) => page.meta?.has_more ? page.meta.cursor ?? undefined : undefined,
+  });
+  const detail = useQuery({
+    queryKey: ["demo-inbox", user.id, org, "detail", selected], enabled: eligible && selectedValid,
+    retry: false, refetchInterval: demoPolling, refetchIntervalInBackground: false, refetchOnWindowFocus: false,
+    queryFn: async ({ signal }) => {
+      const res = await apiClient.get<{ data: ConversationWithContact }>(`/api/v1/conversations/${selected}`, { signal });
+      if (res.data.id !== selected) throw new Error("Conversation access could not be verified.");
+      return checkedConversation(res.data);
+    },
+  });
+  const messages = useInfiniteQuery({
+    queryKey: ["demo-inbox", user.id, org, "messages", selected],
+    enabled: eligible && selectedValid && !!detail.data && !detail.isError,
+    initialPageParam: undefined as string | undefined, retry: false,
+    refetchInterval: demoPolling, refetchIntervalInBackground: false, refetchOnWindowFocus: false,
+    queryFn: async ({ pageParam, signal }) => {
+      const qs = new URLSearchParams({ limit: "50" });
+      if (pageParam) qs.set("cursor", pageParam);
+      const page = await apiClient.get<DemoPage<ConversationMensagem>>(`/api/v1/conversations/${selected}/messages?${qs}`, { signal });
+      if (page.data.some(m => m.organization_id !== org || m.channel_session_id !== DEMO_WEB_CHANNEL ||
+          m.conversation_id !== selected || m.contact_id !== detail.data?.contact_id || !Number.isFinite(Date.parse(m.sent_at))))
+        throw new Error("Message access could not be verified.");
+      return page;
+    },
+    getNextPageParam: page => page.meta?.has_more ? page.meta.cursor ?? undefined : undefined,
+  });
+  const conversations = Array.from(new Map(list.data?.pages.flatMap(p => p.data).map(c => [c.id, c])).values());
+  const ordered = Array.from(new Map(messages.data?.pages.flatMap(p => p.data).map(m => [m.id, m])).values())
+    .sort((a, b) => Date.parse(a.sent_at) - Date.parse(b.sent_at) || a.id.localeCompare(b.id));
+  if (!eligible) return <p role="alert">An authenticated organization is required.</p>;
+  return <section aria-label="Read-only demo Inbox" className="space-y-3">
+    <p>Read-only viewer. Messages appear when stored by the channel or Worker; this view does not send replies.</p>
+    <div className="grid gap-4 md:grid-cols-[minmax(12rem,1fr)_2fr]">
+      <nav aria-label="Conversations" className="space-y-2">
+        {list.isPending ? <p role="status">Loading conversations…</p> : list.isError ?
+          <p role="alert">Unable to load conversations. Your session or access may have changed.</p> : <>
+            {!conversations.length && <p>No conversations yet.</p>}
+            {conversations.map(c => <button key={c.id} type="button" aria-pressed={selected === c.id}
+              className="block w-full rounded border p-2 text-left" onClick={() => setSelected(c.id)}>
+              {c.contacts?.display_name || c.contacts?.name || "Customer"}
+            </button>)}
+            {list.hasNextPage && <button disabled={list.isFetching} onClick={() => { void list.fetchNextPage({ cancelRefetch: false }); }}>More conversations</button>}
+          </>}
+      </nav>
+      <div aria-label="Conversation messages" className="space-y-3">
+        {!selected ? <p>Select a conversation.</p> : !selectedValid ? <p role="alert">Invalid conversation.</p> :
+          detail.isError ? <p role="alert">Conversation unavailable or outside your access.</p> :
+          detail.isPending || messages.isPending ? <p role="status">Loading messages…</p> :
+          messages.isError ? <p role="alert">Unable to load messages. Your session or access may have changed.</p> : <>
+            {!ordered.length && <p>No messages yet.</p>}
+            {messages.hasNextPage && <button disabled={messages.isFetching} onClick={() => { void messages.fetchNextPage({ cancelRefetch: false }); }}>Older messages</button>}
+            <ol className="space-y-3">{ordered.map(m => <li key={m.id} className="rounded border p-3">
+              <p className="text-xs font-semibold">{m.direction === "inbound" ? "Customer" :
+                m.sent_via === "ai" ? "AI reply" : m.sent_via === "user" || m.sent_via === "crm" ? "Human reply" : "Outbound message"}
+                {" · "}<time dateTime={m.sent_at}>{new Date(m.sent_at).toLocaleString("en-US")}</time>
+                {" · "}{m.status}</p>
+              <p className="whitespace-pre-wrap break-words">{m.revoked_at ? "Message deleted" : m.body || `[${m.type} message — media unavailable in this viewer]`}</p>
+            </li>)}</ol>
+          </>}
+      </div>
+    </div>
+  </section>;
 }

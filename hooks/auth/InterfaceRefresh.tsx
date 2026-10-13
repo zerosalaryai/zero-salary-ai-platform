@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef } from "react";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useT } from "@/hooks/i18n/useT";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -17,6 +18,10 @@ export function InterfaceRefresh({
   org: ActiveOrg | null;
   support: boolean;
 }) {
+  const demo = useDemoWebPresentation();
+  return demo ? null : <NormalInterfaceRefresh userId={userId} org={org} support={support} />;
+}
+function NormalInterfaceRefresh({ userId, org, support }: { userId: string; org: ActiveOrg | null; support: boolean }) {
   const t = useT();
   const router = useRouter();
   const expected = JSON.stringify(lerInterface(org?.interface_settings).settings);

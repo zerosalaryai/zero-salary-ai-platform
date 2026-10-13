@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useTransition } from "react";
 
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
+import { demoWebLogin } from "@/lib/auth/demo-web-login";
 import { useT } from "@/hooks/i18n/useT";
 import { Button } from "@/components/ui/button";
 import { TOTPInput } from "@/components/auth/TOTPInput";
@@ -28,6 +30,7 @@ interface EnrollState {
  */
 export function MfaEnrollModal({ motivo = "obrigatorio" }: { motivo?: "obrigatorio" | "escolha" } = {}) {
   const t = useT();
+  const demo = useDemoWebPresentation();
   const [step, setStep] = useState<Step>("intro");
   const [enrollState, setEnrollState] = useState<EnrollState | null>(null);
   const [code, setCode] = useState("");
@@ -39,7 +42,10 @@ export function MfaEnrollModal({ motivo = "obrigatorio" }: { motivo?: "obrigator
   useEffect(() => {
     if (step !== "scan" || enrollState) return;
     startTransition(async () => {
-      const res = await enrollMfa();
+      const res = demo
+        ? await demoWebLogin<Awaited<ReturnType<typeof enrollMfa>>>({ kind: "enroll" }).catch(() => undefined)
+        : await enrollMfa();
+      if (!res) { setError(t("Não foi possível iniciar a configuração.")); setStep("intro"); return; }
       if (!res.ok) {
         setError(res.message ?? t("Não foi possível iniciar a configuração."));
         setStep("intro");
@@ -52,7 +58,7 @@ export function MfaEnrollModal({ motivo = "obrigatorio" }: { motivo?: "obrigator
         secret: res.secret,
       });
     });
-  }, [step, enrollState, t]);
+  }, [step, enrollState, t, demo]);
 
   const submitCode = (codeArg?: string) => {
     if (!enrollState) return;
@@ -60,7 +66,10 @@ export function MfaEnrollModal({ motivo = "obrigatorio" }: { motivo?: "obrigator
     if (finalCode.length !== 6) return;
     setError(null);
     startTransition(async () => {
-      const res = await confirmMfaEnroll(finalCode, enrollState.factor_id);
+      const res = demo
+        ? await demoWebLogin<Awaited<ReturnType<typeof confirmMfaEnroll>>>({ kind: "confirm-enroll", code: finalCode, factor_id: enrollState.factor_id }).catch(() => undefined)
+        : await confirmMfaEnroll(finalCode, enrollState.factor_id);
+      if (!res) { setError(t("Falha ao confirmar. Tente novamente.")); return; }
       if (!res.ok) {
         if (res.error === "verify_failed" || res.error === "invalid_code") {
           setError(t("Código inválido. Tente novamente."));
