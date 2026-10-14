@@ -2,6 +2,7 @@ import { expect, it, vi } from 'vitest';
 import type pg from 'pg';
 
 import { drainTick } from './drain';
+import { withServiceJob } from '@/lib/atendimento/fronteira-server';
 
 const knobs = { batchSize: 10, intervalMs: 0, idleIntervalMs: 0, debounceMs: 0, reapTimeoutMs: 60000 };
 const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never;
@@ -15,10 +16,13 @@ const event = {
   },
 };
 
+const trustedBoundary = { organization_id: event.organization_id, contact_id: event.payload.contact_id, conversation_id: event.payload.conversation_id, service_revision: 2, demanda_id: null, demanda_revision: null, status: 'open', demanda_fechada_em: null };
+
 it('org em ai_dispatch_mode=external: evento vira done SEM enfileirar job', async () => {
   const calls: string[] = [];
   const query = vi.fn().mockImplementation((sql: string) => {
     calls.push(sql);
+    if (sql.includes('c.service_revision::float8')) return { rows: [trustedBoundary] };
     if (sql.includes('returning e.id')) return { rows: [event] };            // claim
     if (sql.includes("ai_dispatch_mode")) return { rows: [{ mode: 'external' }] }; // guard
     if (sql.includes('is_group')) return { rows: [{ is_group: false }] };
@@ -52,6 +56,7 @@ function poolFalso(
 ) {
   const query = vi.fn().mockImplementation((sql: string) => {
     calls.push(sql);
+    if (sql.includes('c.service_revision::float8')) return { rows: [trustedBoundary] };
     if (sql.includes('returning e.id')) return { rows: [eventoDeAudio(Number(process.env.__ESPERA__ ?? 0))] };
     if (sql.includes('ai_dispatch_mode')) return { rows: [{ mode: null }] };
     if (sql.includes('is_group')) return { rows: [{ is_group: false }] };
@@ -138,6 +143,7 @@ it('coalescência exclui job em hold (held_run_after) — sessão morta não seq
   const calls: string[] = [];
   const query = vi.fn().mockImplementation((sql: string) => {
     calls.push(sql);
+    if (sql.includes('c.service_revision::float8')) return { rows: [trustedBoundary] };
     if (sql.includes('returning e.id')) return { rows: [eventoDeAudio(0)] };
     if (sql.includes('ai_dispatch_mode')) return { rows: [{ mode: null }] };
     if (sql.includes('is_group')) return { rows: [{ is_group: false }] };
@@ -224,6 +230,7 @@ function poolElegibilidade(
   const inboundId = '44444444-4444-4444-8444-444444444444';
   const query = vi.fn().mockImplementation((sql: string) => {
     calls.push(sql);
+    if (sql.includes('c.service_revision::float8')) return { rows: [trustedBoundary] };
     if (sql.includes('returning e.id')) return { rows: [{ ...event, created_at: new Date().toISOString() }] };
     if (sql.includes('ai_dispatch_mode')) return { rows: [{ mode: null }] };
     if (sql.includes('is_group')) return { rows: [{ is_group: false }] };
@@ -377,4 +384,82 @@ it("open explícito preserva o canal de demo terminado em 0230", async () => {
     aiGate: 'open', phoneNumber: '+5511999990230', aiAuthorizedAt: null,
   }), knobs, log);
   expect(calls.some(s => s.includes('job_queue'))).toBe(true);
+});
+
+
+function boundaryFixture(observed: unknown = trustedBoundary) {
+  const original = poolElegibilidade([], { aiGate: 'open' });
+  const payloads: Record<string, unknown>[] = [];
+  const query = vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes('c.service_revision::float8')) {
+      expect(sql).toContain('where c.organization_id=$1 and c.id=$2');
+      expect(values).toEqual([event.organization_id, event.payload.conversation_id]);
+      if (observed instanceof Error) throw observed;
+      return { rows: observed === null ? [] : [observed] };
+    }
+    if (sql.includes('insert into job_queue')) {
+      payloads.push(values![4] as Record<string, unknown>);
+      return { rows: [{ id: 'synthetic-job' }] };
+    }
+    return original.query(sql, values);
+  });
+  return { pool: { query } as unknown as pg.Pool, query, payloads };
+}
+it('captures a trusted boundary at enqueue and the unchanged consumer accepts it', async () => {
+  const f = boundaryFixture();
+  await drainTick(f.pool, knobs, log);
+  expect(f.payloads).toHaveLength(1);
+  const expected = { organization_id: event.organization_id, contact_id: event.payload.contact_id,
+    conversation_id: event.payload.conversation_id, service_revision: 2, demanda_id: null, demanda_revision: null };
+  expect(f.payloads[0]!.service_boundary).toEqual(expected);
+  const action = vi.fn(async () => 'allowed');
+  await expect(withServiceJob(f.pool, { kind: 'inbound_turn', organization_id: event.organization_id,
+    contact_id: event.payload.contact_id, payload: f.payloads[0] } as never, action)).resolves.toBe('allowed');
+  expect(action).toHaveBeenCalledTimes(1);
+});
+it.each([null, { ...trustedBoundary, service_revision: 0 }, { ...trustedBoundary, status: 'closed' },
+  { ...trustedBoundary, organization_id: 'foreign-org' }, { ...trustedBoundary, contact_id: 'foreign-contact' },
+  { ...trustedBoundary, conversation_id: 'foreign-conversation' }, new Error('synthetic DB failure')])(
+  'does not enqueue on absent, invalid, terminal, foreign or failed trusted state: %j', async observed => {
+    const f = boundaryFixture(observed);
+    await drainTick(f.pool, knobs, log);
+    expect(f.payloads).toHaveLength(0);
+  });
+it.each([null, { ...trustedBoundary, service_revision: 3 },
+  { ...trustedBoundary, organization_id: 'foreign-org' }, { ...trustedBoundary, status: 'closed' }])(
+  'consumer still rejects missing or changed state after enqueue: %j', async observed => {
+    const f = boundaryFixture(); await drainTick(f.pool, knobs, log);
+    const action = vi.fn();
+    const db = { query: vi.fn(async () => ({ rows: observed ? [observed] : [] })) };
+    await expect(withServiceJob(db as never, { kind: 'inbound_turn', organization_id: event.organization_id,
+      contact_id: event.payload.contact_id, payload: f.payloads[0] } as never, action)).rejects.toThrow('service_boundary_stale');
+    expect(action).not.toHaveBeenCalled();
+  });
+it('does not coalesce into a job with a missing/different service boundary', async () => {
+  const f = boundaryFixture(); await drainTick(f.pool, { ...knobs, debounceMs: 500 }, log);
+  const call = f.query.mock.calls.find(([sql]) => sql.includes('select id from job_queue'))!;
+  expect(call[0]).toContain("payload->'service_boundary' = $3::jsonb");
+  expect(JSON.parse(String(call[1]![2]))).toEqual(f.payloads[0]!.service_boundary);
+});
+
+it.each([{ demanda_id: 'another-demand', demanda_revision: 1 }, { demanda_id: 'original-demand', demanda_revision: 2 }])(
+  'consumer rejects changed demand after capture: %j', async change => {
+    const current = { ...trustedBoundary, demanda_id: 'original-demand', demanda_revision: 1 };
+    const f = boundaryFixture(current); await drainTick(f.pool, knobs, log);
+    const db = { query: vi.fn(async () => ({ rows: [{ ...current, ...change }] })) };
+    const action = vi.fn();
+    await expect(withServiceJob(db as never, { kind: 'inbound_turn', organization_id: event.organization_id,
+      contact_id: event.payload.contact_id, payload: f.payloads[0] } as never, action)).rejects.toThrow('service_boundary_stale');
+    expect(action).not.toHaveBeenCalled();
+  });
+it('preserves first-demand opening in the same service revision', async () => {
+  const f = boundaryFixture(); await drainTick(f.pool, knobs, log);
+  const db = { query: vi.fn(async () => ({ rows: [{ ...trustedBoundary, demanda_id: 'first-demand', demanda_revision: 1 }] })) };
+  await expect(withServiceJob(db as never, { kind: 'inbound_turn', organization_id: event.organization_id,
+    contact_id: event.payload.contact_id, payload: f.payloads[0] } as never, async () => 'allowed')).resolves.toBe('allowed');
+  const pending = boundaryFixture({ ...trustedBoundary, demanda_id: 'first-demand', demanda_revision: 1 });
+  await drainTick(pending.pool, { ...knobs, debounceMs: 500 }, log);
+  const sql = pending.query.mock.calls.find(([sql]) => sql.includes('select id from job_queue'))![0];
+  expect(sql).toContain("payload->'service_boundary'->'demanda_id' = 'null'::jsonb");
+  expect(sql).toContain("($3::jsonb - 'demanda_id' - 'demanda_revision')");
 });

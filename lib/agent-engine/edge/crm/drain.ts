@@ -20,6 +20,8 @@ import type pg from 'pg';
 import { insertInboxItem } from '../../db/repository';
 import type { Logger } from '../../obs/logger';
 import { enqueueJob } from '../../queue/queue';
+import { readCurrentServiceBoundary } from '@/lib/atendimento/fronteira-server';
+import { parseServiceBoundary, assertCurrentServiceBoundary } from '@/lib/atendimento/fronteira';
 import { avisoDeEventoMorto, IA_QUE_NAO_RESPONDEU } from '@/lib/event-log/aviso-de-evento-morto';
 import { TIPOS_DERIVAVEIS, DERIVACAO_TERMINADA } from '@/lib/messaging/media/derivable';
 import { decidirElegibilidadeDaConversa } from '@/lib/ai/elegibilidade/consulta-pg';
@@ -453,6 +455,19 @@ async function processEvent(
     });
   }
 
+  // Captura na origem, pelo tenant/conversa confiáveis; nunca no consumo do job.
+  const current = await readCurrentServiceBoundary(pool, event.organization_id, p.conversation_id);
+  const captured = parseServiceBoundary(current);
+  const boundary = captured ? {
+    organization_id: event.organization_id,
+    contact_id: p.contact_id,
+    conversation_id: p.conversation_id,
+    service_revision: captured.service_revision,
+    demanda_id: captured.demanda_id,
+    demanda_revision: captured.demanda_revision,
+  } : null;
+  assertCurrentServiceBoundary(boundary, current);
+
   // Coalescência: já existe job PENDING futuro deste contato → esta mensagem
   // entra de carona (o turno lê o histórico completo). Evento vira done.
   //
@@ -473,8 +488,13 @@ async function processEvent(
        where organization_id = $1 and contact_id = $2
          and kind = 'inbound_turn' and status = 'pending' and run_after > now()
          and not (payload ? 'held_run_after')
+         and (payload->'service_boundary' = $3::jsonb
+           or (payload->'service_boundary'->'demanda_id' = 'null'::jsonb
+             and payload->'service_boundary'->'demanda_revision' = 'null'::jsonb
+             and (payload->'service_boundary' - 'demanda_id' - 'demanda_revision')
+               = ($3::jsonb - 'demanda_id' - 'demanda_revision')))
        limit 1`,
-      [event.organization_id, p.contact_id],
+      [event.organization_id, p.contact_id, JSON.stringify(boundary)],
     );
     if (pendingRows[0]) {
       log.info('drain: rajada coalescida em job pendente', {
@@ -496,6 +516,7 @@ async function processEvent(
       channel_session_id: p.channel_session_id,
       inbound_message_id: p.inbound_message_id,
       crm_event_id: event.id,
+      service_boundary: boundary,
     },
     ...(runAfter !== undefined ? { runAfter } : {}),
   });
