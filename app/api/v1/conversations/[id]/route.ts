@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET   /api/v1/conversations/[id] — single conversation (handler em ../_handler.ts)
@@ -24,6 +25,7 @@ interface RouteCtx {
 }
 
 export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
+
   const requestId = randomUUID();
   const { id } = await ctx.params;
   const supabase = await createClient();
@@ -67,6 +69,9 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
 }
 
 export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(req);
+  if (recoveryDenied) return recoveryDenied;
+
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 

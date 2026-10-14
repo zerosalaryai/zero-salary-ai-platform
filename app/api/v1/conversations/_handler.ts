@@ -1,3 +1,4 @@
+import { demoCrmRecovery } from "@/lib/channels/demo-crm-recovery";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
 import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
@@ -457,7 +458,8 @@ export async function patchConversationHandler(
   conversationId: string,
   input: PatchConversationInput,
 ): Promise<Conversation> {
-  denyDemoWebAction();
+  if (!demoCrmRecovery()) denyDemoWebAction();
+  if (demoCrmRecovery()) await getConversationHandler(supabase, ctx, conversationId);
   const update: Record<string, unknown> = {};
 
   /**

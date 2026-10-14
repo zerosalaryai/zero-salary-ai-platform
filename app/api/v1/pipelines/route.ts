@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET /api/v1/pipelines — lista os funis da org ativa (nome + slug), RLS-scoped.
@@ -27,7 +28,10 @@ import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
+export async function GET(req?: Request): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("manager", { requestId, resource: "pipelines" });
   if (!authz.ok) return authz.response;

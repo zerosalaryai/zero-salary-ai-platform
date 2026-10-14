@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
@@ -39,9 +40,10 @@ export function useUpdateConversationTags() {
  * não autentica; a leitura org-scoped passa pelo servidor.
  */
 export function useConversationTagVocabulary(orgId: string | null) {
+  const demo = useDemoWebPresentation();
   return useQuery({
     queryKey: ["conversation-tag-vocabulary", orgId],
-    enabled: !!orgId,
+    enabled: !demo && (!!orgId),
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<string[]> => {
       const res = await apiClient.get<{ data: string[] }>("/api/v1/conversation-tags");

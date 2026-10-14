@@ -1,3 +1,5 @@
+import { demoCrmRecovery } from "./demo-crm-recovery";
+import { assertDemoStaffDelivery } from "./demo-staff-delivery";
 import { denyDemoWebAction } from "./demo-web-ingress";
 /** Opt-in local do worker: identidade durável, nenhum fallback por payload/prefixo. */
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -147,9 +149,11 @@ export async function assertDemoInbound(
        cs.meta_phone_number_id, ct.phone_number as recipient,
        (select id::text from messages lm where lm.organization_id=cv.organization_id and lm.conversation_id=cv.id
         and lm.direction='inbound' order by coalesce(lm.sent_at,lm.created_at) desc, lm.created_at desc, lm.id desc limit 1) as latest_inbound_id,
-       (select body from messages lm where lm.organization_id=cv.organization_id and lm.conversation_id=cv.id
+       (select coalesce(lm.body, case when lm.type='audio' and lm.media_derived_status='ready' then lm.media_derived_text end) from messages lm where lm.organization_id=cv.organization_id and lm.conversation_id=cv.id
         and lm.direction='inbound' order by coalesce(lm.sent_at,lm.created_at) desc, lm.created_at desc, lm.id desc limit 1) as latest_body,
        (ct.is_blocked is false and ct.force_human is false and cv.is_group is false
+        ${demoCrmRecovery() ? `and not exists(select 1 from conversations other where other.organization_id=cv.organization_id
+          and other.contact_id=ct.id and other.channel_session_id<>cs.id)` : ''}
         and (cv.assignee_kind is null or cv.assignee_kind='ai')
         and not exists (select 1 from conversations h where h.organization_id=ct.organization_id
           and h.contact_id=ct.id and h.bot_silenced_until > now())
@@ -226,6 +230,7 @@ export async function assertDemoOutbound(
   conversationId: string,
   jobId?: string,
 ): Promise<void> {
+  if (await assertDemoStaffDelivery(organizationId, conversationId)) return;
   if (!demoInboundOnly()) return;
   const ctx = execution.getStore();
   if (
@@ -288,6 +293,7 @@ export async function assertDemoTransport(input: {
   kind: string;
 }): Promise<void> {
   denyDemoWebAction();
+  if (await assertDemoStaffDelivery(input.organizationId, undefined, input)) return;
   if (!demoInboundOnly()) return;
   const ctx = execution.getStore();
   if (!ctx || input.kind !== "text" || input.organizationId !== ctx.binding.organizationId)

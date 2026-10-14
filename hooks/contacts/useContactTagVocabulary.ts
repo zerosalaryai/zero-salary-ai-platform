@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 
@@ -14,9 +15,10 @@ import { apiClient } from "@/lib/api/client";
 // decisão de time: um `showApiError` em query de fundo dispara toast a cada
 // abertura do painel enquanto a rota estiver quebrada.
 export function useContactTagVocabulary(orgId: string | null) {
+  const demo = useDemoWebPresentation();
   return useQuery({
     queryKey: ["contact-tag-vocabulary", orgId],
-    enabled: !!orgId,
+    enabled: !demo && (!!orgId),
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<string[]> => {
       const res = await apiClient.get<{ data: string[] }>("/api/v1/contact-tags");

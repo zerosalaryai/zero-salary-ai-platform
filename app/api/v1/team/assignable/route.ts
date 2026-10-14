@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 /**
  * GET /api/v1/team/assignable — destinos válidos de transferência de conversa
  * (G3-01, ReassignDialog): membros ativos agent+ da org ativa.
@@ -24,6 +25,9 @@ interface AssignableMember {
 }
 
 export async function GET(_req: NextRequest): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(_req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "team" });
   if (!authz.ok) return authz.response;

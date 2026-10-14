@@ -1,4 +1,5 @@
 "use client";
+import { useDemoCrmOperational } from "@/lib/i18n/IdiomaProvider";
 import { useT } from "@/hooks/i18n/useT";
 import {
   forwardRef,
@@ -74,6 +75,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
   ref,
 ) {
   const t = useT();
+  const operational = useDemoCrmOperational();
   const [text, setText] = useState("");
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [contactPickerOpen, setContactPickerOpen] = useState(false);
@@ -169,6 +171,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
    * Ctrl+V precisa continuar sendo o Ctrl+V de sempre.
    */
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
+    if (operational && e.clipboardData.files.length) { e.preventDefault(); return; }
     if (mode !== "reply" || respostaBarrada || pendingFile) return;
     const imagem = imagemDoClipboard(e.clipboardData, new Date());
     if (!imagem) return; // colagem de texto segue o caminho normal do browser
@@ -204,7 +207,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
           mode === "note" && "border-warning/40 bg-warning-bg",
         )}
       >
-        {mode === "reply" && (
+        {mode === "reply" && !operational && (
           <ReplyReviewPanel conversationId={conversationId} disabled={isDisabled} />
         )}
         <TemplateMenu
@@ -229,6 +232,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
           </button>
           <button
             type="button"
+            disabled={operational}
             onClick={() => setMode("note")}
             className={cn(
               "rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
@@ -273,7 +277,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
         <div className="flex items-end gap-2">
           {mode === "reply" && (
             <AttachMenu
-              disabled={respostaBarrada}
+              disabled={respostaBarrada || operational}
               onPick={setPendingFile}
               onPickContact={() => setContactPickerOpen(true)}
             />
@@ -347,7 +351,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
               <PaperPlaneTilt size={16} weight="fill" aria-hidden />
             </Button>
           ) : (
-            <AudioRecorder conversationId={conversationId} disabled={respostaBarrada} />
+            <AudioRecorder conversationId={conversationId} disabled={respostaBarrada || operational} />
           )}
         </div>
       </div>
@@ -376,7 +380,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
           }
         }}
       />
-      <ContactPickerDialog
+      {!operational && <ContactPickerDialog
         open={contactPickerOpen}
         onOpenChange={setContactPickerOpen}
         excludeContactId={currentContactId}
@@ -398,7 +402,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer(
             { onSuccess: () => setContactPickerOpen(false) },
           );
         }}
-      />
+      />}
     </>
   );
 });

@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/leads/[id]/lose
@@ -27,6 +28,9 @@ export async function POST(
   req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(req);
+  if (recoveryDenied) return recoveryDenied;
+
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
