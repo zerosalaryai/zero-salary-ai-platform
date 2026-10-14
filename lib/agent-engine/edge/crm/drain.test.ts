@@ -461,5 +461,5 @@ it('preserves first-demand opening in the same service revision', async () => {
   await drainTick(pending.pool, { ...knobs, debounceMs: 500 }, log);
   const sql = pending.query.mock.calls.find(([sql]) => sql.includes('select id from job_queue'))![0];
   expect(sql).toContain("payload->'service_boundary'->'demanda_id' = 'null'::jsonb");
-  expect(sql).toContain("($3::jsonb - 'demanda_id' - 'demanda_revision')");
+  expect(sql).toContain("($3::jsonb - 'demanda_id'::text - 'demanda_revision'::text)");
 });

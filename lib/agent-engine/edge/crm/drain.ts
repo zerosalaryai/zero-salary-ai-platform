@@ -491,8 +491,9 @@ async function processEvent(
          and (payload->'service_boundary' = $3::jsonb
            or (payload->'service_boundary'->'demanda_id' = 'null'::jsonb
              and payload->'service_boundary'->'demanda_revision' = 'null'::jsonb
-             and (payload->'service_boundary' - 'demanda_id' - 'demanda_revision')
-               = ($3::jsonb - 'demanda_id' - 'demanda_revision')))
+             and (case when jsonb_typeof(payload->'service_boundary') = 'object'
+               then ((payload->'service_boundary') - 'demanda_id'::text - 'demanda_revision'::text) end)
+               = ($3::jsonb - 'demanda_id'::text - 'demanda_revision'::text)))
        limit 1`,
       [event.organization_id, p.contact_id, JSON.stringify(boundary)],
     );
