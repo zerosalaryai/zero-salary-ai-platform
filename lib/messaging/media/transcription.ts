@@ -32,22 +32,50 @@ export function apiTranscriptionProvider(
   fetchImpl: typeof fetch = fetch,
 ): TranscriptionProvider {
   const base = creds.baseUrl ?? DEFAULT_BASE;
-  const model = creds.model ?? DEFAULT_MODEL;
+  // Seleção pelo destino oficial, sem alterar backends OpenAI-compatíveis.
+  const sarvam = base.trim().replace(/\/+$/, "") === "https://api.sarvam.ai";
+  const model = creds.model ?? (sarvam ? "saaras:v3" : DEFAULT_MODEL);
   return {
     async transcribe(audio, mime) {
       const form = new FormData();
       form.append("model", model);
+      if (sarvam) {
+        form.append("language_code", "unknown");
+        form.append("mode", "transcribe");
+      }
       form.append(
         "file",
         new Blob([new Uint8Array(audio)], { type: mime.split(";")[0]!.trim() }),
         `audio.${extFor(mime)}`,
       );
-      const res = await fetchImpl(`${base}/v1/audio/transcriptions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${creds.apiKey}` },
-        body: form,
-      });
+      const res = await fetchImpl(
+        sarvam ? "https://api.sarvam.ai/speech-to-text" : `${base}/v1/audio/transcriptions`,
+        {
+          method: "POST",
+          headers: sarvam
+            ? { "api-subscription-key": creds.apiKey }
+            : { Authorization: `Bearer ${creds.apiKey}` },
+          body: form,
+        },
+      );
       if (!res.ok) throw new Error(`transcription_${res.status}`);
+      if (sarvam) {
+        let result: unknown;
+        try {
+          result = await res.json();
+        } catch {
+          throw new Error("transcription_invalid_response");
+        }
+        if (
+          !result ||
+          typeof result !== "object" ||
+          !("transcript" in result) ||
+          typeof result.transcript !== "string" ||
+          !result.transcript.trim()
+        )
+          throw new Error("transcription_invalid_response");
+        return result.transcript;
+      }
       const json = (await res.json()) as { text?: string };
       return json.text ?? "";
     },
