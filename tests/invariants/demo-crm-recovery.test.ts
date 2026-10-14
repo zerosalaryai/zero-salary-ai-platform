@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { Pool } from "pg";
+import { assertCurrentServiceBoundary, parseServiceBoundary } from "../../lib/atendimento/fronteira";
 import { beforeAll, beforeEach, afterAll, describe, it, expect } from "vitest";
 const enabled=process.env.RUN_DEMO_RECOVERY_DB_TESTS==="disposable";
 const org="10000000-0000-4000-8000-000000000343",foreign="10000000-0000-4000-8000-000000000344",channel="c67e9f8a-8719-4481-9154-ed8a464f85bd",off="df10c6c2-d728-47a4-8995-240fba6d4799",staff="50000000-0000-4000-8000-000000000343",viewer="50000000-0000-4000-8000-000000000344";
@@ -26,6 +27,7 @@ describe.skipIf(!enabled)("0343 real isolated receipt and staff transactions",()
   authorized=true;
   // Development-only idempotent DDL, exclusively in the verified empty fixture.
   await db.query("begin");try{await db.query(readFileSync("supabase/migrations/20261014120000_0343_demo_crm_recovery.sql","utf8"));await db.query("commit");}catch(e){await db.query("rollback");throw e;}
+  await db.query(readFileSync("supabase/migrations/20261015000000_0344_demo_message_service_boundary.sql","utf8"));
   await db.query("insert into public.organizations(id,slug,legal_name,display_name) values($1,'synthetic-recovery','Synthetic recovery','Synthetic recovery'),($2,'synthetic-recovery-foreign','Synthetic foreign','Synthetic foreign')",[org,foreign]);
   await db.query("insert into public.channel_sessions(id,organization_id,waha_session_name,webhook_secret_encrypted,provider,webhook_path_token,meta_waba_id,meta_phone_number_id,phone_number,metadata,status) values($1,$2,'synthetic-recovery',decode('00','hex'),'meta_cloud','synthetic-recovery-token','111','222','+15555550230','{\"ai_gate\":\"open\"}','WORKING'),($3,$2,'synthetic-off',decode('00','hex'),'meta_cloud','synthetic-off-token','333','444','+15555557270','{\"ai_gate\":\"off\"}','WORKING')",[channel,org,off]);
   await db.query("insert into auth.users(id,email) values($1,'synthetic-staff@example.invalid'),($2,'synthetic-viewer@example.invalid')",[staff,viewer]);
@@ -57,4 +59,29 @@ describe.skipIf(!enabled)("0343 real isolated receipt and staff transactions",()
  it("privileged scope check sees another channel even when client-side RLS could hide it",async()=>{const r=await assigned();const contactId=(await db.query("select contact_id from public.messages where id=$1",[r.message_id])).rows[0].contact_id;expect((await userRpc(staff,"select public.fn_demo_crm_scope($1,$2,null,null) as allowed",[org,r.conversation_id])).rows[0].allowed).toBe(true);await db.query("insert into public.conversations(organization_id,channel_session_id,contact_id,status) values($1,$2,$3,'open')",[org,off,contactId]);expect((await userRpc(staff,"select public.fn_demo_crm_scope($1,$2,null,null) as allowed",[org,r.conversation_id])).rows[0].allowed).toBe(false);});
  it("checkpoint summary is bound to the exact job tenant, contact, channel and conversation",async()=>{const r=await assigned();const contactId=(await db.query("select contact_id from public.messages where id=$1",[r.message_id])).rows[0].contact_id;const job=(await db.query("insert into public.job_queue(organization_id,contact_id,kind,payload,status) values($1,$2,'inbound_turn',$3::jsonb,'done') returning id",[org,contactId,JSON.stringify({channel_session_id:off,conversation_id:r.conversation_id})])).rows[0].id;await db.query("insert into public.lead_checkpoints(organization_id,contact_id,job_id,rolling_summary) values($1,$2,$3,'Synthetic accepted V2 checkpoint')",[org,contactId,job]);expect((await userRpc(staff,"select public.fn_demo_crm_checkpoint_summary($1,$2) summary",[org,contactId])).rows[0].summary).toBeNull();await db.query("update public.job_queue set payload=$1::jsonb where id=$2",[JSON.stringify({channel_session_id:channel,conversation_id:r.conversation_id}),job]);expect((await userRpc(staff,"select public.fn_demo_crm_checkpoint_summary($1,$2) summary",[org,contactId])).rows[0].summary).toBe("Synthetic accepted V2 checkpoint");await expect(userRpc(staff,"select public.fn_demo_crm_checkpoint_summary($1,$2)",[foreign,contactId])).rejects.toThrow();});
  it("one-attempt claims cannot be repeated after an uncertain delivery",async()=>{const r=await assigned();const q=(await userRpc(staff,enqueue,[org,r.conversation_id,randomUUID(),"Single attempt"])).rows[0].message;const claims=await Promise.all([db.query("select * from public.fn_demo_claim_staff_reply($1,now()-interval '10 minutes')",[org]),db.query("select * from public.fn_demo_claim_staff_reply($1,now()-interval '10 minutes')",[org])]);const all=claims.flatMap(c=>c.rows);expect(all).toHaveLength(1);expect(new Set(all.map(c=>c.id)).size).toBe(all.length);const own=(await db.query("select * from public.demo_staff_deliveries where message_id=$1",[q.id])).rows[0];if(own.status==="pending")await db.query("select * from public.fn_demo_claim_staff_reply($1,now()-interval '10 minutes')",[org]);await db.query("select public.fn_demo_settle_staff_reply($1,$2,'uncertain')",[org,own.id]);expect((await db.query("select status from public.demo_staff_deliveries where id=$1",[own.id])).rows[0].status).toBe("uncertain");expect((await db.query("select metadata from public.messages where id=$1",[q.id])).rows[0].metadata.demo_staff_delivery_state).toBe("uncertain");await expect(userRpc(staff,enqueue,[org,r.conversation_id,randomUUID(),"Single attempt"])).rejects.toThrow("demo_staff_reconciliation_required");expect((await db.query("select * from public.fn_demo_claim_staff_reply($1,now()-interval '10 minutes')",[org])).rows).toHaveLength(0);});
+ it.each(["text","audio"])("0344 %s message provenance survives canonical job insertion",async type=>{
+  const a=args(type,type==="text"?"Synthetic inbound":null);
+  const r=type==="audio"?await voice(a):(await db.query(textSql,a)).rows[0].result;
+  const m=(await db.query("select * from public.messages where id=$1",[r.message_id])).rows[0];
+  expect(Number(m.service_revision)).toBe(1);
+  const payload={inbound_message_id:r.message_id,conversation_id:m.conversation_id,channel_session_id:channel,
+    service_boundary:{organization_id:"forged",service_revision:999}};
+  const j=(await db.query("insert into public.job_queue(organization_id,contact_id,kind,payload) values($1,$2,'inbound_turn',$3) returning payload",[org,m.contact_id,payload])).rows[0];
+  expect(j.payload.service_boundary).toMatchObject({organization_id:org,contact_id:m.contact_id,conversation_id:m.conversation_id,service_revision:1});
+  const current=(await db.query("select public.fn_service_boundary($1,$2) b",[org,m.conversation_id])).rows[0].b;
+  expect(()=>assertCurrentServiceBoundary(parseServiceBoundary(j.payload.service_boundary),current)).not.toThrow();
+  await db.query("update public.conversations set service_revision=service_revision+1 where id=$1 and organization_id=$2",[m.conversation_id,org]);
+  const changed=(await db.query("select public.fn_service_boundary($1,$2) b",[org,m.conversation_id])).rows[0].b;
+  expect(()=>assertCurrentServiceBoundary(parseServiceBoundary(j.payload.service_boundary),changed)).toThrow('service_boundary_stale');
+ });
+ it("0344 forged message IDs and cross-tenant jobs cannot acquire trusted provenance",async()=>{
+  const r=(await db.query(textSql,args("text","Synthetic scoped inbound"))).rows[0].result;
+  const m=(await db.query("select contact_id from public.messages where id=$1",[r.message_id])).rows[0];
+  for(const [tenant,message] of [[org,randomUUID()],[foreign,r.message_id]]){
+   const j=(await db.query("insert into public.job_queue(organization_id,contact_id,kind,payload) values($1,$2,'inbound_turn',$3) returning payload",[tenant,m.contact_id,{inbound_message_id:message,service_boundary:{organization_id:tenant,service_revision:1}}])).rows[0];
+   expect(j.payload.service_boundary).toBeNull();
+   expect(()=>assertCurrentServiceBoundary(parseServiceBoundary(j.payload.service_boundary),null)).toThrow('service_boundary_stale');
+  }
+ });
+
 });
