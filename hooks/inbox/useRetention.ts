@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 import type { RetentionContext } from "@/lib/inbox/retention-copy";
@@ -21,9 +22,10 @@ export interface RetentionData {
  * suficiente pra "operação visível" sem custo de canal dedicado.
  */
 export function useRetention(conversationId: string | null) {
+  const demo = useDemoWebPresentation();
   return useQuery({
     queryKey: ["conversation-retention", conversationId],
-    enabled: !!conversationId,
+    enabled: !demo && (!!conversationId),
     refetchInterval: 30_000,
     queryFn: () =>
       apiClient

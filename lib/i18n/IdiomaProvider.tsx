@@ -41,6 +41,8 @@ import { normalizarIdioma, IDIOMA_PADRAO, type Idioma } from "./idiomas";
  */
 // Somente apresentação derivada do layout servidor; não autoriza dados/ações.
 const DemoCtx = createContext(false);
+const OperationalCtx = createContext(false);
+export function useDemoCrmOperational(): boolean { return useContext(OperationalCtx); }
 export function useDemoWebPresentation(): boolean { return useContext(DemoCtx); }
 
 const Ctx = createContext<{ idioma: Idioma; aplicar: (i: Idioma) => void }>({
@@ -102,7 +104,7 @@ export function IdiomaProvider({
     // Um clique local não habilita inglês fora da demo nem altera sua apresentação fixa.
     aplicar: (novo: Idioma) => setIdioma(demo ? "en-US" : normalizarIdioma(novo)),
   }), [idioma, demo]);
-  return <DemoCtx.Provider value={demo}><Ctx.Provider value={valor}>{children}</Ctx.Provider></DemoCtx.Provider>;
+  return <DemoCtx.Provider value={demo}><OperationalCtx.Provider value={demo && demoPresentation?.operational === true}><Ctx.Provider value={valor}>{children}</Ctx.Provider></OperationalCtx.Provider></DemoCtx.Provider>;
 }
 
 /** `t("Assumir")` → "Asumir" para quem escolheu espanhol. */

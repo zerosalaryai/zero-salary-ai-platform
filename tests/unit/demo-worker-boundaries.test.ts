@@ -176,7 +176,7 @@ describe("boot: nenhum replay, cron ou tick global em demo", () => {
       .slice(0, end + 1)
       .map((node) => node.getText(ast))
       .join("\n")} })()`;
-    for (const fault of ["none", "config", "binding", "activation"]) {
+    for (const fault of ["none", "recovery", "config", "binding", "activation"]) {
       const calls: string[] = [];
       const step = (name: string) => {
         calls.push(name);
@@ -185,6 +185,7 @@ describe("boot: nenhum replay, cron ou tick global em demo", () => {
       const promise = runInNewContext(boot, {
         env: { DEMO_INBOUND_ONLY: "true", DEMO_CHANNEL_ID: demo.channelId },
         denyDemoWebAction: () => undefined,
+        demoCrmRecovery: () => { step("recovery"); return false; },
         readDemoConfig: (env: Record<string, unknown>) => {
           step("config");
           return readDemoConfig(env);
@@ -205,7 +206,7 @@ describe("boot: nenhum replay, cron ou tick global em demo", () => {
       });
       if (fault === "none") {
         await promise;
-        expect(calls).toEqual(["config", "pool", "binding", "activation", "schema"]);
+        expect(calls).toEqual(["recovery", "config", "pool", "binding", "activation", "schema"]);
       } else {
         await expect(promise).rejects.toThrow("denied");
         expect(calls.at(-1)).toBe(fault);

@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 /**
  * GET /api/v1/pipelines/default — pipeline padrão da org ativa (o primeiro
  * não-arquivado, se nenhum estiver marcado `is_default`), com estágios.
@@ -16,7 +17,10 @@ import { traduzir } from "@/lib/i18n/dicionario";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<Response> {
+export async function GET(req: Request): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "pipelines" });
   if (!authz.ok) return authz.response;

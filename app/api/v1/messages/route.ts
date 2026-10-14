@@ -1,3 +1,8 @@
+import { demoCrmRecovery } from "@/lib/channels/demo-crm-recovery";
+import { readDemoWebConfig } from "@/lib/channels/demo-web-ingress";
+import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
+import { demoCrmOriginAllowed } from "@/lib/channels/demo-crm-origin";
+import { z } from "zod";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/messages — envia mensagem outbound (handler em ./_handler.ts).
@@ -49,6 +54,20 @@ export async function POST(req: NextRequest): Promise<Response> {
   }
 
   try {
+    if (readDemoWebConfig() && demoCrmRecovery()) {
+      const key = req.headers.get("idempotency-key");
+      if (!demoCrmOriginAllowed(req) || actor.type !== "user" || !z.uuid().safeParse(key).success || input.type !== "text" ||
+          input.media_storage_path || input.media_url || input.template_name || input.reply_to_message_id || !input.body?.trim())
+        return fail("forbidden", "demo_staff_denied", 403, { requestId });
+      await demoInboxReadChannel(supabase, {organization_id: organizationId, actor, requestId});
+      const result = await supabase.rpc("fn_demo_queue_staff_reply" as never, {
+        p_org: organizationId, p_conversation: input.conversation_id, p_key: key, p_body: input.body,
+      } as never);
+      if (result.error?.message.includes("demo_staff_reconciliation_required"))
+        return fail("state_conflict", "A matching reply is pending or unconfirmed. Review it before sending again.", 409, {requestId});
+      if (result.error || !result.data) return fail("forbidden", "demo_staff_denied", 403, {requestId});
+      return ok(result.data, {status: 201, requestId});
+    }
     const message = await sendMessageHandler(
       supabase,
       {

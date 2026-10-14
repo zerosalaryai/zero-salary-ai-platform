@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 /**
  * GET /api/v1/conversations/[id]/passagens — o que a IA deixou para quem assume.
  *
@@ -68,6 +69,9 @@ interface RouteParams {
 }
 
 export async function GET(_req: NextRequest, { params }: RouteParams): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(_req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "passagens_de_atendimento" });
   if (!authz.ok) return authz.response;

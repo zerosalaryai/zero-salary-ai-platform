@@ -1,4 +1,7 @@
 "use client";
+import { useRef } from "react";
+import { useDemoCrmOperational } from "@/lib/i18n/IdiomaProvider";
+import { randomId } from "@/lib/random-id";
 import { useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 import { showApiError } from "@/components/feedback/ApiErrorToast";
@@ -32,10 +35,19 @@ interface MessagesPage {
 
 export function useSendMessage() {
   const qc = useQueryClient();
+  const operational = useDemoCrmOperational();
+  const intent = useRef<{fingerprint: string; key: string} | null>(null);
 
   return useMutation({
-    mutationFn: async (input: SendArgs) =>
-      apiClient.post<{ data: Message }>("/api/v1/messages", input),
+    mutationFn: async (input: SendArgs) => {
+      if (!operational) return apiClient.post<{ data: Message }>("/api/v1/messages", input);
+      const fingerprint = JSON.stringify(input);
+      if (!intent.current || intent.current.fingerprint !== fingerprint) intent.current = {fingerprint, key: randomId()};
+      const response = await apiClient.post<{data: Message}>("/api/v1/messages", input, {idempotencyKey: intent.current.key});
+      // Keep a failed/uncertain intent stable; clear only after durable queue acknowledgement.
+      intent.current = null;
+      return response;
+    },
     onMutate: async (args) => {
       if (args.media_storage_path || args.media_url || args.type === "contact") return {};
 

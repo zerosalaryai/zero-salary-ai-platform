@@ -206,6 +206,8 @@ export function MessageBubble({
             </div>
           </div>
         )}
+        {message.metadata?.demo_staff_delivery_state === "uncertain" && <p role="status" className="mb-1 text-xs">Delivery unconfirmed. Do not resend; reconciliation required.</p>}
+        {message.metadata?.demo_staff_delivery_state === "failed" && <p role="status" className="mb-1 text-xs">Delivery not completed. Staff review required.</p>}
         {senderLabel && (
           <div className="mb-0.5 flex items-center gap-1 text-[11px] font-semibold opacity-80">
             {senderLabel === "IA" ? (

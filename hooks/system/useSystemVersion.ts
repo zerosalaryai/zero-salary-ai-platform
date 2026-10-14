@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useQuery } from "@tanstack/react-query";
 
 import { apiClient } from "@/lib/api/client";
@@ -61,7 +62,9 @@ export interface SystemVersion {
  * a cada 5 min — bater mais rápido não traria informação nova.
  */
 export function useSystemVersion(opts?: { refetchInterval?: number }) {
+  const demo = useDemoWebPresentation();
   return useQuery({
+    enabled: !demo,
     queryKey: ["system-version"],
     queryFn: async () => {
       const res = await apiClient.get<{ data: SystemVersion }>("/api/v1/system/version");

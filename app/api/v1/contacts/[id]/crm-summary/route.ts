@@ -1,3 +1,5 @@
+import { demoCrmRecovery } from "@/lib/channels/demo-crm-recovery";
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 /**
  * GET /api/v1/contacts/[id]/crm-summary — o resumo de CRM do painel do inbox.
  *
@@ -74,6 +76,9 @@ export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(_req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const { id: contactId } = await ctx.params;
 
@@ -147,8 +152,18 @@ export async function GET(
   }>;
   const nomes = await nomesDosAtendentes(linhas.map((a) => a.performed_by_user_id ?? null));
 
+  let checkpointSummary: string | null = null;
+  if (demoCrmRecovery()) {
+    // guardDemoCrmRequest already rejects contacts shared with other channels.
+    const checkpoint = await supabase.rpc("fn_demo_crm_checkpoint_summary" as never, {
+      p_org: contactScope.organization_id, p_contact: contactId,
+    } as never);
+    if (checkpoint.error) return fail("internal_error", "Checkpoint unavailable.", 500, {requestId});
+    checkpointSummary = typeof checkpoint.data === "string" ? checkpoint.data : null;
+  }
   return ok(
     {
+      ...(demoCrmRecovery() ? {checkpoint_summary: checkpointSummary} : {}),
       leads: (leads.data ?? []).map((row) => comCamposDoFunil(row as Record<string, unknown>)),
       orders: orders.data ?? [],
       activities: linhas.map((a) => ({

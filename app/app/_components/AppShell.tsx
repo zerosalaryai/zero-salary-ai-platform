@@ -1,5 +1,5 @@
 "use client";
-import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
+import { useDemoCrmOperational, useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { UserMenu } from "@/components/shell/UserMenu";
 import type { ReactNode } from "react";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -26,7 +26,8 @@ interface AppShellProps {
 
 export function AppShell({ sidebarCollapsed, podeAtender, children }: AppShellProps) {
   const demo = useDemoWebPresentation();
-  return demo ? (
+  const operational = useDemoCrmOperational();
+  return demo && !operational ? (
     <div className="flex min-h-screen flex-col">
       <header className="flex items-center justify-between border-b p-3"><span>Inbox · Read-only demo</span><UserMenu /></header>
       <main className="min-h-0 flex-1 p-3">{children}</main>
@@ -34,16 +35,10 @@ export function AppShell({ sidebarCollapsed, podeAtender, children }: AppShellPr
   ) : <NormalAppShell sidebarCollapsed={sidebarCollapsed} podeAtender={podeAtender}>{children}</NormalAppShell>;
 }
 function NormalAppShell({ sidebarCollapsed, podeAtender, children }: AppShellProps) {
-  useInboundMessageAlerts();
-  useCrmAlerts();
-  useNotifyOpenFromServiceWorker();
-  // O SINAL DE PRESENÇA (issue #996) sai daqui porque presença é "esta aba
-  // está aberta" — não "a pessoa está na tela Equipe". Quem atende passa o dia
-  // no Inbox e na Agenda; um emissor amarrado à tela de gestão diria que só o
-  // gerente está presente.
-  useSinalDePresenca(podeAtender);
+  const demo = useDemoWebPresentation();
   return (
     <div className="flex min-h-screen w-full bg-background">
+      {!demo && <ShellBackground podeAtender={podeAtender} />}
       <BarraDeProgressoNavegacao />
       <div className="hidden md:block">
         <Sidebar collapsed={sidebarCollapsed} />
@@ -73,4 +68,16 @@ function NormalAppShell({ sidebarCollapsed, podeAtender, children }: AppShellPro
       </div>
     </div>
   );
+}
+
+function ShellBackground({podeAtender}: {podeAtender: boolean}) {
+  useInboundMessageAlerts();
+  useCrmAlerts();
+  useNotifyOpenFromServiceWorker();
+  // O SINAL DE PRESENÇA (issue #996) sai daqui porque presença é "esta aba
+  // está aberta" — não "a pessoa está na tela Equipe". Quem atende passa o dia
+  // no Inbox e na Agenda; um emissor amarrado à tela de gestão diria que só o
+  // gerente está presente.
+  useSinalDePresenca(podeAtender);
+  return null;
 }

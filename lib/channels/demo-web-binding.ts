@@ -1,3 +1,6 @@
+import { demoCrmRecovery } from "./demo-crm-recovery";
+import { transcribeDemoVoice } from "./demo-voice";
+import { storagePathFor } from "@/lib/messaging/media/types";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -129,8 +132,11 @@ export async function ingestDemoWebAtomic(
         ...(event.sharedContact ? { shared_contact: event.sharedContact } : {}),
       },
     });
+    const voice = demoCrmRecovery() && event.type === "audio" ?
+      event.media ? await transcribeDemoVoice(organizationId, ctx.binding.meta_phone_number_id, event.media) : (() => { throw new DemoWebDenied(); })() : null;
+    const optOutText = voice?.text ?? body;
     const { data, error } = await admin.rpc(
-      "fn_demo_ingest_meta" as never,
+      (demoCrmRecovery() ? "fn_demo_ingest_meta_recovery" : "fn_demo_ingest_meta") as never,
       {
         p_token: ctx.token,
         p_org: organizationId,
@@ -140,7 +146,8 @@ export async function ingestDemoWebAtomic(
         p_admitted_at: ctx.binding.started_at,
         p_source: source,
         p_fingerprint: createHash("sha256").update(source).digest("hex"),
-        p_opt_out: ehPedidoDeOptOut(body) || ehOptOutProvavel(body),
+        p_opt_out: ehPedidoDeOptOut(optOutText) || ehOptOutProvavel(optOutText),
+        ...(demoCrmRecovery() ? { p_transcript: voice?.text ?? null } : {}),
       } as never,
     );
     const r = data as Record<string, unknown> | null;
@@ -161,6 +168,13 @@ export async function ingestDemoWebAtomic(
         : r.dispatch_event_id !== null)
     )
       throw new DemoWebDenied();
+    if (voice) {
+      const path = storagePathFor(organizationId, String(r.conversation_id), String(r.message_id), voice.mime);
+      const uploaded = await admin.storage.from("whatsapp-media").upload(path, voice.buffer, { contentType: voice.mime, upsert: false });
+      // Receipt/dispatch already committed. Storage failure must never generate a second event.
+      if (!uploaded.error) await admin.from("messages").update({ media_storage_path: path, media_mime: voice.mime, media_size_bytes: voice.buffer.byteLength })
+        .eq("id", String(r.message_id)).eq("organization_id", organizationId).eq("channel_session_id", ctx.binding.id);
+    }
     return {
       status: r.duplicate ? "duplicate" : "ingested",
       messageId: r.message_id,

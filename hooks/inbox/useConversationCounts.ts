@@ -1,4 +1,5 @@
 "use client";
+import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 
@@ -36,6 +37,7 @@ export function useConversationCounts(
   orgId: string | null,
   filtros: FiltrosDaContagem = {},
 ) {
+  const demo = useDemoWebPresentation();
   const qs = new URLSearchParams();
   if (filtros.unread) qs.set("unread", "true");
   if (filtros.tag) qs.set("tag", filtros.tag);
@@ -47,7 +49,7 @@ export function useConversationCounts(
     // guardada para OUTRO conjunto de filtros, sem ir ao servidor — e o badge
     // voltaria a mentir, agora pelo cache. Seria o mesmo defeito por outra porta.
     queryKey: ["conversation-counts", orgId, sufixo],
-    enabled: !!orgId,
+    enabled: !demo && (!!orgId),
     refetchInterval: 30_000,
     queryFn: () =>
       apiClient

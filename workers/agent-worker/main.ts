@@ -1,3 +1,5 @@
+import { runDemoStaffLoop } from "./demo-staff";
+import { demoCrmRecovery } from "@/lib/channels/demo-crm-recovery";
 import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import { readDemoConfig, bindDemoChannel, withDemoInbound, activateDemoWorker } from '@/lib/channels/demo-inbound-only';
 import { createApprovedReplyHandler } from "@/lib/agent-engine/agent/approved-reply";
@@ -262,7 +264,10 @@ export async function startWorker(
   log: Logger = createLogger(),
 ): Promise<void> {
   denyDemoWebAction();
+  const recovery = demoCrmRecovery(); // Validate before any queue, drain, HTTP or timer starts.
   const demoConfig = readDemoConfig(env); // valida antes de conectar ou iniciar qualquer loop
+  if (recovery && (!demoConfig || env.ZSAI_AGENT_RUNTIME !== "python" || !env.ZSAI_PYTHON_AGENT_URL || !env.ZSAI_INTERNAL_AGENT_SECRET))
+    throw new Error("demo_recovery_python_configuration_required");
   const pool = createPool(env.SUPABASE_DB_URL, (err) =>
     log.error("pool: conexão caiu — recria no próximo uso", { error: errMsg(err) }),
   );
@@ -363,6 +368,7 @@ export async function startWorker(
   // turno espera, e o agente respondia "não consigo ouvir" com a transcrição
   // pronta segundos depois. O cron continua como rede de segurança — o claim
   // otimista do `drainEventLog` torna os dois seguros em paralelo.
+  const staffLoop = demo && recovery ? runDemoStaffLoop(pool, demo, log, loopsAbort.signal) : Promise.resolve();
   const eventLogLoop = demo ? Promise.resolve() : runEventLogDrainLoop(
     {
       intervalMs: env.EVENT_LOG_DRAIN_INTERVAL_MS,
@@ -592,6 +598,7 @@ export async function startWorker(
     await Promise.all([
       drainLoop,
       eventLogLoop,
+      staffLoop,
       healthLoop,
       cronLoop,
       sessionWatchdogLoop,

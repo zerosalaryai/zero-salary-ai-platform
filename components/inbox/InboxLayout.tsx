@@ -3,7 +3,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/types";
 import { DEMO_WEB_CHANNEL } from "@/lib/channels/demo-web-ingress";
-import { useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
+import { useDemoCrmOperational, useDemoWebPresentation } from "@/lib/i18n/IdiomaProvider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/hooks/i18n/useT";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -132,9 +132,11 @@ interface InboxLayoutProps {
 
 export function InboxLayout(props: InboxLayoutProps = {}) {
   const demo = useDemoWebPresentation();
-  return demo ? <DemoInbox key={props.initialSelectedId ?? "list"} {...props} /> : <NormalInboxLayout {...props} />;
+  const operational = useDemoCrmOperational();
+  return demo && !operational ? <DemoInbox key={props.initialSelectedId ?? "list"} {...props} /> : <NormalInboxLayout {...props} />;
 }
 function NormalInboxLayout({ initialSelectedId = null }: InboxLayoutProps = {}) {
+  const operational = useDemoCrmOperational();
   const t = useT();
   const { activeOrg, user } = useAuth();
   const supportReadonly = user.support?.access_mode === "support_readonly";
@@ -499,7 +501,7 @@ function NormalInboxLayout({ initialSelectedId = null }: InboxLayoutProps = {}) 
             <div className="min-h-0 flex-1 overflow-hidden">
               <ChatThread
                 conversationId={selectedConversation.id}
-                onResponder={setRespondendo}
+                onResponder={operational ? undefined : setRespondendo}
                 // O cartão da passagem escolhe o gesto a partir de quem é o dono
                 // da conversa: sem dono convida a assumir, com outro dono diz
                 // quem atende. Sem estes dois campos ele cairia no estado mais

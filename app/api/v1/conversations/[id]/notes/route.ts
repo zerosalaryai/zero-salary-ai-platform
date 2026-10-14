@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET  /api/v1/conversations/[id]/notes — lista notas internas da conversa (nunca vai ao WhatsApp).
@@ -26,6 +27,9 @@ interface RouteParams {
 }
 
 export async function GET(_req: NextRequest, { params }: RouteParams): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(_req);
+  if (recoveryDenied) return recoveryDenied;
+
   const requestId = randomUUID();
   const authz = await requireRole("agent", { requestId, resource: "conversation_notes" });
   if (!authz.ok) return authz.response;
@@ -53,6 +57,9 @@ export async function GET(_req: NextRequest, { params }: RouteParams): Promise<R
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(req);
+  if (recoveryDenied) return recoveryDenied;
+
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 

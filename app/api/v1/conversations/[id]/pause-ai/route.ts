@@ -1,3 +1,4 @@
+import { guardDemoCrmRequest } from "@/lib/channels/demo-crm-scope";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * POST /api/v1/conversations/[id]/pause-ai — a pessoa assume o comando e o
@@ -53,6 +54,9 @@ interface RouteCtx {
 }
 
 export async function POST(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
+  const recoveryDenied = await guardDemoCrmRequest(_req);
+  if (recoveryDenied) return recoveryDenied;
+
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 

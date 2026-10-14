@@ -473,6 +473,7 @@ export function CRMSidePanel({ conversation }: Props) {
   const [demandas, setDemandas] = useState<DemandaRow[] | null>(null);
   const [fatos, setFatos] = useState<Array<{ id: string; headline: string; body: string }>>([]);
   const [historico, setHistorico] = useState<Array<{ id: string; desfecho: string; fechada_em: string }>>([]);
+  const [checkpointSummary, setCheckpointSummary] = useState<string | null>(null);
   const [summaryContactId, setSummaryContactId] = useState<string | null>(null);
   /**
    * O TERCEIRO ESTADO. Antes existiam dois — carregando e "tem N itens" — e a
@@ -508,6 +509,7 @@ export function CRMSidePanel({ conversation }: Props) {
     let cancelled = false;
 
     setErro(false);
+    setCheckpointSummary(null);
 
     // Pela ROTA, não pelo cliente de navegador: o cookie de sessão é httpOnly,
     // então o supabase-js do browser não vê a sessão e consultava como `anon`
@@ -516,6 +518,7 @@ export function CRMSidePanel({ conversation }: Props) {
       try {
         const r = await apiClient.get<{
           data: {
+            checkpoint_summary?: string | null;
             leads: LeadRow[];
             orders: OrderRow[];
             activities: ActivityRow[];
@@ -526,6 +529,7 @@ export function CRMSidePanel({ conversation }: Props) {
         }>(`/api/v1/contacts/${contactId}/crm-summary`);
         if (cancelled) return;
         setSummaryContactId(contactId);
+        setCheckpointSummary(r.data.checkpoint_summary ?? null);
         setLeads(r.data.leads);
         setOrders(r.data.orders);
         setActivities(r.data.activities);
@@ -598,6 +602,7 @@ export function CRMSidePanel({ conversation }: Props) {
 
   return (
     <aside className="flex h-full flex-col gap-4 overflow-y-auto border-l border-border bg-background p-4">
+      {!sectionsLoading && checkpointSummary && <section aria-label="AI summary"><h3 className="text-xs font-semibold">AI summary</h3><p className="whitespace-pre-wrap text-sm">{checkpointSummary}</p></section>}
       <section>
         <h3 className="text-xs font-semibold text-text">
           {t("Contato")}

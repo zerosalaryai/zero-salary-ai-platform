@@ -1,3 +1,5 @@
+import { readDemoWebConfig, DEMO_WEB_CHANNEL } from "@/lib/channels/demo-web-ingress";
+import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET  /api/v1/channel-sessions — lista os canais WhatsApp da org (do DB).
@@ -36,8 +38,9 @@ export async function GET(): Promise<Response> {
   if (!activeOrg) return fail("forbidden_tenant", "Nenhuma organização ativa.", 403, { requestId });
 
   const supabase = await createClient();
-  const base = () =>
-    supabase
+  if (readDemoWebConfig()) await demoInboxReadChannel(supabase, {organization_id: activeOrg.orgId, actor: {type: "user", id: user.id}, requestId});
+  const base = () => {
+    const query = supabase
       .from("channel_sessions")
       .select(CHANNEL_COLUMNS)
       .eq("organization_id", activeOrg.orgId)
@@ -46,6 +49,8 @@ export async function GET(): Promise<Response> {
       // telefone: entrando aqui, ela vira um número a mais no seletor do inbox e
       // na barra lateral — sem nome, sem estado vigiado e sem para onde mandar.
       .in("provider", [...PROVIDERS_DE_MENSAGEM]);
+    return readDemoWebConfig() ? query.eq("id", DEMO_WEB_CHANNEL) : query;
+  };
   // Canais arquivados sobrevivem só como âncora das FKs RESTRICT
   // (conversations/messages). Para o usuário eles foram excluídos.
   //
