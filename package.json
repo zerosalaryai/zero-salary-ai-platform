@@ -35,7 +35,8 @@
     "release:conferir": "tsx scripts/cortar-release.ts",
     "release:cortar": "tsx scripts/cortar-release.ts --escrever",
     "gov:verify": "pnpm typecheck && pnpm lint && pnpm lint:channels && pnpm lint:role-rank && pnpm test:unit",
-    "worker": "tsx --env-file-if-exists=.env --env-file=.env.local workers/agent-worker/main.ts",
+    "worker:runtime": "node --require ./workers/agent-worker/node-runtime.cjs --import tsx workers/agent-worker/main.ts",
+    "worker": "node --env-file-if-exists=.env --env-file=.env.local --require ./workers/agent-worker/node-runtime.cjs --import tsx workers/agent-worker/main.ts",
     "dev:crons": "tsx --env-file=.env --env-file=.env.local scripts/dev-crons.ts",
     "flywheel:judge": "tsx --env-file=.env --env-file=.env.local scripts/flywheel-judge-live.ts"
   },
