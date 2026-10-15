@@ -1,3 +1,4 @@
+import type { SpeechConfig } from "../../external/speech-artifact";
 /**
  * Config da borda CRM pós-fusão. O transporte MCP HTTP do Vendaval MORREU: o CRM
  * é o mesmo processo/banco agora. O que resta desta borda:
@@ -15,6 +16,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 export interface CrmEdgeConfig {
   /** admin client (service role) — usado só pelas bordas que chamam handlers do app. */
   supabase: SupabaseClient;
+  speech?: SpeechConfig & { allowlistTtlMs: number };
   /**
    * ai_agents.id do agente PUBLICADO deste turno (Fase 2B) — vira o actor.id do
    * envio (audit/metadata do CRM). Ausente = id genérico do engine.

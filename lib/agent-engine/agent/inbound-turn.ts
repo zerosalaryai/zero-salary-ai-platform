@@ -1,3 +1,4 @@
+import { resolveVoiceReply } from '../external/voice-delivery';
 import { assertDemoOutbound, demoInboundOnly, DemoIsolationError } from '@/lib/channels/demo-inbound-only';
 import { setExecutionAgentOperation } from '@/lib/atendimento/fronteira-server';
 import { TIPOS_DE_CASO, TIPOS_DE_CASO_PARA_A_IA } from "@/lib/ai/case-copy";
@@ -3050,7 +3051,22 @@ async function executarTurnoDoAgente(
             },
             // `finalBody` = corpo após a cadeia (o disclosureGate F4-05 pode prependar o
             // disclosure via inject); é ELE que vai ao canal, não o `body` capturado da tool.
-            send: (finalBody: string) => {
+            send: async (finalBody: string) => {
+              const finalLanguage = detectReplyLanguage(finalBody).language;
+              const voice = acceptedExternalResponseForNextSend !== undefined && input.inboundMessageId
+                ? await resolveVoiceReply(pool, {
+                    organizationId: tenantId, conversationId: input.conversationId,
+                    inboundMessageId: input.inboundMessageId,
+                    language: finalLanguage === 'undetermined' ? replyLanguage.language : finalLanguage,
+                  }) : undefined;
+              if (voice) {
+                seq += 1;
+                return liveChannel().send({
+                  tenantId, leadId, jobId: liveJob().id, jobClaim: claimOfJob(liveJob()),
+                  agentOperation, seq, conversationId: input.conversationId, body: finalBody,
+                  voice, acceptedResponse: acceptedExternalResponseForNextSend,
+                });
+              }
               const bubbles = splitForSend(
                 finalBody,
                 agentConfig?.splitMessages ?? false,
@@ -4023,6 +4039,11 @@ async function executarTurnoDoAgente(
         return parsed.data;
       };
 
+      const sendExternalReply = async (text: string, response?: ExternalAgentReplyV2) => {
+        acceptedExternalResponseForNextSend = response ?? null;
+        try { return await sendMessageTool.execute!({ body: text }); }
+        finally { acceptedExternalResponseForNextSend = undefined; }
+      };
       const storedBinding = await loadExternalResponseBinding(pool, {
         tenantId,
         jobId: liveJob().id,
@@ -4045,6 +4066,13 @@ async function executarTurnoDoAgente(
               traceId: recoveredAcceptedResponse.trace_id,
               acceptedResponse: recoveredAcceptedResponse,
             }
+          : storedBinding?.kind === 'prepared'
+            ? await (async () => {
+                const frozen = parseAcceptedResponse(storedBinding.response);
+                const result = await sendExternalReply(frozen.reply.text, frozen);
+                if (!result.ok) throw new Error('voice_frozen_reply_denied');
+                return { kind: 'reply_processed' as const, traceId: frozen.trace_id, acceptedResponse: frozen };
+              })()
           : await executeExternalGeneration({
               config: deps.externalAgent!,
               log: runLog,
@@ -4071,14 +4099,7 @@ async function executarTurnoDoAgente(
                 },
                 previousSummary: externalPreviousSummary,
               },
-              sendReply: async (text, acceptedResponse) => {
-                acceptedExternalResponseForNextSend = acceptedResponse ?? null;
-                try {
-                  return await sendMessageTool.execute!({ body: text });
-                } finally {
-                  acceptedExternalResponseForNextSend = undefined;
-                }
-              },
+              sendReply: sendExternalReply,
               handoff: handoffFromExternal,
             });
 

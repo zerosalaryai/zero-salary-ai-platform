@@ -1,5 +1,7 @@
 import { ApiError } from "@/lib/api/types";
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { reservedVoiceDelivery, type VoiceReply } from "../../external/voice-contract";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Queryable } from "../../queue/queue";
 
@@ -19,12 +21,15 @@ type Intent = {
   seq: number;
   body: string;
   acceptedResponse?: unknown;
+  voice?: VoiceReply;
 };
 type Row = {
   id: string;
   status: SendLedgerStatus;
   crm_message_id: string | null;
   external_response?: unknown;
+  body_hash?: string;
+  voice_delivery?: unknown;
 };
 interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
@@ -35,7 +40,7 @@ interface LedgerStore {
    * precisa fazer a prova de ausência e o update na mesma operação atômica.
    */
   rebindUnsent?(input: Intent, hash: string, key: string): Promise<boolean>;
-  message(org: string, key: string): Promise<{ id: string; status: string } | null>;
+  message(org: string, key: string): Promise<{ id: string; status: string; external_id?: string | null } | null>;
   update(
     org: string,
     key: string,
@@ -50,7 +55,7 @@ interface LedgerStore {
 export async function sendWithLedger(
   store: LedgerStore,
   input: Intent,
-  send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
+  send: (key: string, messageId: string) => Promise<{ id: string; status: string; external_id?: string | null }>,
 ): Promise<SendOutcome> {
   const hash = createHash("sha256").update(input.body).digest("hex");
   let key: string;
@@ -66,6 +71,13 @@ export async function sendWithLedger(
     if (prior.status === "accepted")
       return { kind: "already_sent", idempotencyKey: key, crmMessageId: prior.crm_message_id };
     if (prior.status === "vetoed") return { kind: "blocked", idempotencyKey: key };
+    if (prior.voice_delivery != null) {
+      const frozen = prior.voice_delivery as { voice?: unknown };
+      if (!input.voice || prior.body_hash !== hash || !isDeepStrictEqual(frozen.voice, input.voice) ||
+          !isDeepStrictEqual(prior.external_response, input.acceptedResponse))
+        throw new Error("voice_intent_changed");
+      if (prior.status === "failed") throw new Error("voice_delivery_uncertain");
+    } else if (input.voice) throw new Error("voice_intent_changed");
     if (prior.status === "failed") key = await store.rotate(input, hash);
   }
   const existing = await store.message(input.tenantId, key);
@@ -75,6 +87,7 @@ export async function sendWithLedger(
   // ela pode ter sido aceita pelo transporte: preserve a resposta anterior.
   if (
     prior?.status === "requested" &&
+    prior.voice_delivery == null &&
     input.acceptedResponse !== undefined &&
     existing === null
   ) {
@@ -107,6 +120,8 @@ export async function sendWithLedger(
       throw error;
     }
   }
+  if (input.voice && ["sent", "delivered", "read"].includes(message.status) && !message.external_id?.trim())
+    throw new Error("voice_delivery_receipt_uncertain");
   const status: SendLedgerStatus = ["sent", "delivered", "read"].includes(message.status)
     ? "accepted"
     : message.status === "failed"
@@ -154,7 +169,8 @@ export async function loadAcceptedExternalResponse(
 export type ExternalResponseBinding =
   | { kind: "accepted"; response: unknown }
   | { kind: "pending"; response: unknown }
-  | { kind: "replaceable"; response: unknown };
+  | { kind: "replaceable"; response: unknown }
+  | { kind: "prepared"; response: unknown };
 
 /**
  * Consulta a resposta já ligada antes de gerar outra. Uma mensagem existente ou
@@ -171,8 +187,9 @@ export async function loadExternalResponseBinding(
     status: SendLedgerStatus;
     crm_message_id: string | null;
     external_response: unknown;
+    voice_delivery?: { state?: string } | null;
   }>(
-    `select id, seq, status, crm_message_id, external_response
+    `select id, seq, status, crm_message_id, external_response, voice_delivery
        from send_ledger
       where organization_id = $1
         and job_id = $2
@@ -181,13 +198,19 @@ export async function loadExternalResponseBinding(
   );
   const row = rows[0];
   if (!row) return null;
-  if (row.status === "accepted") return { kind: "accepted", response: row.external_response };
+  if (row.status === "accepted" && row.voice_delivery == null) return { kind: "accepted", response: row.external_response };
 
   const store = pgSendLedger(db);
   const message = await store.message(input.tenantId, row.id);
-  if (message && ["sent", "delivered", "read"].includes(message.status)) {
+  if (message && ["sent", "delivered", "read"].includes(message.status) &&
+      (row.voice_delivery == null || !!message.external_id?.trim())) {
     await store.update(input.tenantId, row.id, "accepted", message.id, null);
     return { kind: "accepted", response: row.external_response };
+  }
+  if (row.voice_delivery != null) {
+    const resumable = row.status === "requested" && message === null &&
+      ["reserved", "ready"].includes(row.voice_delivery.state ?? "");
+    return { kind: resumable ? "prepared" : "pending", response: row.external_response };
   }
   if (row.status === "failed" || message?.status === "failed") {
     return { kind: "replaceable", response: row.external_response };
@@ -218,7 +241,7 @@ export function pgSendLedger(db: Queryable): LedgerStore {
   return {
     async create(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash, external_response) values ($1, $2, $3, $4, $5, $6) returning id",
+        "insert into send_ledger (organization_id, contact_id, job_id, seq, body_hash, external_response, voice_delivery) values ($1, $2, $3, $4, $5, $6, $7) returning id",
         [
           i.tenantId,
           i.leadId,
@@ -226,6 +249,7 @@ export function pgSendLedger(db: Queryable): LedgerStore {
           i.seq,
           hash,
           i.acceptedResponse === undefined ? null : JSON.stringify(i.acceptedResponse),
+          i.voice ? JSON.stringify(reservedVoiceDelivery(i.voice)) : null,
         ],
       );
       if (!rows[0]) throw new Error("send_ledger_insert_missing");
@@ -240,7 +264,7 @@ export function pgSendLedger(db: Queryable): LedgerStore {
     },
     async rotate(i, hash) {
       const { rows } = await db.query<{ id: string }>(
-        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,external_response=$5,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 returning id",
+        "update send_ledger set id=gen_random_uuid(),status='requested',body_hash=$4,external_response=$5,crm_message_id=null,last_error=null,updated_at=now() where organization_id=$1 and job_id=$2 and seq=$3 and voice_delivery is null returning id",
         [
           i.tenantId,
           i.jobId,
@@ -264,6 +288,7 @@ export function pgSendLedger(db: Queryable): LedgerStore {
             and ledger.seq=$3
             and ledger.id=$6
             and ledger.status='requested'
+            and ledger.voice_delivery is null
             and ledger.crm_message_id is null
             and not exists (
               select 1
@@ -284,8 +309,8 @@ export function pgSendLedger(db: Queryable): LedgerStore {
       return rows.length === 1;
     },
     async message(org, key) {
-      const { rows } = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
+      const { rows } = await db.query<{ id: string; status: string; external_id?: string | null }>(
+        "select id,status,external_id from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
         [org, key],
       );
       return rows[0] ?? null;
