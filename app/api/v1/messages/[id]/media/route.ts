@@ -86,8 +86,11 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
           message.media_storage_path !== storagePathFor(activeOrg.orgId, message.conversation_id, messageId, mime) ||
           !Number.isFinite(message.media_size_bytes) || message.media_size_bytes! <= 0 || message.media_size_bytes! > 25 * 1024 * 1024)
         return fail("not_found", "Stored media unavailable.", 404, { requestId });
-      // Session client retains Storage RLS; no service-role signing or redirect.
-      const { data: blob, error: downloadError } = await supabase.storage.from("whatsapp-media").download(message.media_storage_path);
+      // The private bucket permits service-role reads only (0055). All identity
+      // and canonical-path checks above use the session client before this read.
+      // Return authorized bytes only; never expose credentials or a signed URL.
+      const { data: blob, error: downloadError } = await createAdminClient().storage
+        .from("whatsapp-media").download(message.media_storage_path);
       if (downloadError || !blob || blob.size !== message.media_size_bytes)
         return fail("not_found", "Stored media unavailable.", 404, { requestId });
       return new Response(blob, { headers: {
