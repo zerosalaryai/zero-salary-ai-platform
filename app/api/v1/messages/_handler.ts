@@ -1,3 +1,5 @@
+import { preparedVoiceMatches, guardPreparedVoiceEffect } from "@/lib/agent-engine/external/voice-delivery";
+import { demoVoiceRequestAllowed } from "@/lib/channels/demo-inbound-only";
 import { denyDemoWebAction } from "@/lib/channels/demo-web-ingress";
 import { demoInboxReadChannel } from "@/lib/channels/demo-inbox-read";
 import { assertDemoOutbound, demoInboundOnly, DemoIsolationError } from "@/lib/channels/demo-inbound-only";
@@ -371,7 +373,13 @@ export async function sendMessageHandler(
 ): Promise<Message> {
   denyDemoWebAction();
   await assertDemoOutbound(ctx.organization_id, input.conversation_id);
-  if (demoInboundOnly() && (input.type !== 'text' || input.media_storage_path)) throw new DemoIsolationError();
+  if (input.metadata?.voice_reply_intent &&
+      (!preparedVoiceMatches(ctx.organization_id, input.conversation_id, input.media_storage_path ?? undefined) ||
+       input.type !== 'audio' || !input.media_storage_path)) throw new DemoIsolationError();
+  if (demoInboundOnly() && (input.type !== 'text' || input.media_storage_path) &&
+      !(input.type === 'audio' && input.media_storage_path &&
+        await demoVoiceRequestAllowed(ctx.organization_id, input.conversation_id, input.media_storage_path)))
+    throw new DemoIsolationError();
   if (ctx.meetingDelivery) await assertMeetingDeliverySupabase(supabase, ctx.meetingDelivery);
   if (ctx.approvedReply) await assertApprovedReplySupabase(supabase, ctx.approvedReply);
   if (ctx.agentOperation) await assertAgentOperationSupabase(supabase, ctx.agentOperation);
@@ -769,6 +777,7 @@ export async function sendMessageHandler(
     try {
       // O que separa mídia de texto é a presença de `media` no envelope — o
       const checkBoundary = async () => {
+        await guardPreparedVoiceEffect();
         await assertDemoOutbound(ctx.organization_id, input.conversation_id);
         await guardServiceEffect();
         await guardAgendaEffect();
@@ -911,6 +920,9 @@ export async function sendMessageHandler(
           replyToExternalId: citada?.external_id ?? null,
         }));
       }
+
+      if (input.metadata?.voice_reply_intent && !externalId?.trim())
+        throw new Error('voice_delivery_receipt_uncertain');
 
       // The provider has accepted the send. Preserve its receipt even if authority
       // changed after the final beforeSend cut; recognition is not another send.

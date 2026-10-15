@@ -1,3 +1,4 @@
+import type { VoiceReply } from "./external/voice-contract";
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import type { JobClaim } from './queue/claim';
 /**
@@ -32,6 +33,7 @@ export interface ChannelSendInput {
    * o pós-envio sem regenerar nem reenviar após crash.
    */
   acceptedResponse?: unknown;
+  voice?: VoiceReply;
   /**
    * Presente = este envio é um TEMPLATE aprovado, não texto livre.
    *

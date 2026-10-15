@@ -1,4 +1,7 @@
-import { assertDemoOutbound } from '@/lib/channels/demo-inbound-only';
+import type { SpeechArtifact } from "../../external/speech-artifact";
+import { deliverVoice, type VoiceReply } from "../../external/voice-delivery";
+import { externalAgentTurnResponseV2Schema } from "../../external/contracts";
+import { assertDemoOutbound, assertDemoVoicePreparation } from '@/lib/channels/demo-inbound-only';
 import { assertAgentOperationPg } from '@/lib/ai/agents/operation';
 import type { AgentOperationContext } from '@/lib/ai/agents/operation';
 import { assertApprovedReplyPg, type ApprovedReplyContext } from '@/lib/ai/replies/delivery';
@@ -58,6 +61,7 @@ export interface SendMessageInput {
   conversationId: string;
   body: string;
   acceptedResponse?: unknown;
+  voice?: VoiceReply;
   /**
    * Presente = envio de TEMPLATE. O `body` continua sendo o texto RENDERIZADO — é
    * ele que entra no hash de idempotência e é ele que os gates de conteúdo avaliaram.
@@ -130,53 +134,82 @@ export async function sendTurnMessage(
     if (policy.body !== input.body || policy.conversation_id !== input.conversationId)
       throw new StaleServiceBoundaryError();
   }
+  if (input.voice) {
+    await assertDemoVoicePreparation(input.tenantId, input.conversationId);
+    const accepted = externalAgentTurnResponseV2Schema.safeParse(input.acceptedResponse);
+    if (
+      !cfg.speech || input.template || sourceJobs[0]?.kind !== 'inbound_turn' ||
+      !accepted.success || accepted.data.status !== 'reply'
+    ) throw new SendToolError('voice_delivery_configuration_denied');
+  }
   return sendWithLedger(pgSendLedger(db), input, async (idempotencyKey, messageId) => {
-    let message: Message;
-    try {
-      message = await sendMessageHandler(
-        cfg.supabase,
-        {
-          organization_id: input.tenantId,
-          actor: { type: 'ai_agent', id: cfg.agentActorId ?? AGENT_ACTOR_ID, role: 'manager' },
-          requestId: idempotencyKey,
-          serviceBoundary: parseServiceBoundary(sourceJobs[0]?.payload.service_boundary),
-          proactiveContext,
-          meetingDelivery,
-          approvedReply,
-          agentOperation: input.agentOperation,
-          internalMessageId: messageId,
-        },
-        {
-          conversation_id: input.conversationId,
-          ...(input.template
-            ? {
-                type: 'template' as const,
-                template_name: input.template.name,
-                template_language: input.template.language,
-                template_values: input.template.values,
-              }
-            : { type: 'text' as const }),
-          body: input.body,
-          metadata: { idempotency_key: idempotencyKey },
-        },
-      );
-    } catch (err) {
-      if (err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
-      if (err instanceof ApiError && err.status === 403) {
-        throw err;
+    const send = async (audio?: SpeechArtifact) => {
+      let message: Message;
+      try {
+        message = await sendMessageHandler(
+          cfg.supabase,
+          {
+            organization_id: input.tenantId,
+            actor: { type: 'ai_agent', id: cfg.agentActorId ?? AGENT_ACTOR_ID, role: 'manager' },
+            requestId: idempotencyKey,
+            serviceBoundary: parseServiceBoundary(sourceJobs[0]?.payload.service_boundary),
+            proactiveContext,
+            meetingDelivery,
+            approvedReply,
+            agentOperation: input.agentOperation,
+            internalMessageId: messageId,
+          },
+          {
+            conversation_id: input.conversationId,
+            ...(input.template
+              ? {
+                  type: 'template' as const,
+                  template_name: input.template.name,
+                  template_language: input.template.language,
+                  template_values: input.template.values,
+                }
+              : audio
+                ? {
+                    type: 'audio' as const,
+                    media_storage_path: audio.media_storage_path,
+                    media_mime: audio.media_mime,
+                    media_size_bytes: audio.media_size_bytes,
+                  }
+                : { type: 'text' as const }),
+            body: input.body,
+            metadata: {
+              idempotency_key: idempotencyKey,
+              ...(audio ? {
+                voice_reply_intent: idempotencyKey,
+                audio_sha256: audio.audio_sha256,
+                text_sha256: audio.text_sha256,
+              } : {}),
+            },
+          },
+        );
+      } catch (err) {
+        if (err instanceof AgendaDeferredError || err instanceof StaleServiceBoundaryError) throw err;
+        if (err instanceof ApiError && err.status === 403) {
+          throw err;
+        }
+        if (err instanceof ApiError && err.status === 404) {
+          await touchLedgerError(db, input.tenantId, idempotencyKey, 'conversa não encontrada');
+          throw new SendToolError('envio recusado: conversa não encontrada');
+        }
+        // Qualquer outra falha (Supabase fora, erro interno do handler): transiente —
+        // o ledger fica 'requested' e o replay reconcilia pela key.
+        const msg = err instanceof Error ? err.message : String(err);
+        await touchLedgerError(db, input.tenantId, idempotencyKey, msg);
+        throw new CrmTransportError(`handler de envio indisponível: ${msg.slice(0, 120)}`);
       }
-      if (err instanceof ApiError && err.status === 404) {
-        await touchLedgerError(db, input.tenantId, idempotencyKey, 'conversa não encontrada');
-        throw new SendToolError('envio recusado: conversa não encontrada');
-      }
-      // Qualquer outra falha (Supabase fora, erro interno do handler): transiente —
-      // o ledger fica 'requested' e o replay reconcilia pela key.
-      const msg = err instanceof Error ? err.message : String(err);
-      await touchLedgerError(db, input.tenantId, idempotencyKey, msg);
-      throw new CrmTransportError(`handler de envio indisponível: ${msg.slice(0, 120)}`);
-    }
 
-    return message;
+      return message;
+    };
+    if (!input.voice) return send();
+    return deliverVoice(db, cfg.supabase, {
+      request_id: idempotencyKey, organization_id: input.tenantId,
+      conversation_id: input.conversationId, text: input.body, language: input.voice.language,
+    }, input.voice, cfg.speech!, send);
   });
 }
 

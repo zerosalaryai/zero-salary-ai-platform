@@ -16,6 +16,8 @@ const envSchema = z.object({
   // Isolamento local do worker: opt-in estrito; UUID completo validado no boot.
   DEMO_INBOUND_ONLY: z.enum(['true', 'false']).default('false'),
   DEMO_CHANNEL_ID: z.string().optional(),
+  // Default-off; canonical voice capability is still required at handler and transport.
+  DEMO_VOICE_REPLY_CHANNEL_ID: z.literal('c67e9f8a-8719-4481-9154-ed8a464f85bd').optional(),
   // Postgres do Supabase (connection string — Settings → Database). O motor usa
   // `pg` direto: FOR UPDATE SKIP LOCKED, advisory locks, FTS.
   SUPABASE_DB_URL: z.string().url(),

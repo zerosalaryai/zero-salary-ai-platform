@@ -223,6 +223,8 @@ const schema = z.object({
   DEMO_WEB_CHANNEL_ID: z.string().optional(),
   DEMO_INBOUND_ONLY: z.enum(['true', 'false']).default('false'),
   DEMO_CHANNEL_ID: z.string().optional(),
+  // Default-off; canonical voice capability is still required at handler and transport.
+  DEMO_VOICE_REPLY_CHANNEL_ID: z.literal('c67e9f8a-8719-4481-9154-ed8a464f85bd').optional(),
   AGENT_DISPATCH_CONSUMER: z.enum(["engine", "native"]).optional().default("engine"),
 
   /**

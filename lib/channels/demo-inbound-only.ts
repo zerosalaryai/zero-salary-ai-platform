@@ -1,3 +1,4 @@
+import { preparedVoiceMatches } from "@/lib/agent-engine/external/voice-delivery";
 import { demoCrmRecovery } from "./demo-crm-recovery";
 import { assertDemoStaffDelivery } from "./demo-staff-delivery";
 import { denyDemoWebAction } from "./demo-web-ingress";
@@ -285,6 +286,26 @@ async function assertCurrentDemoJob(
   if (JSON.stringify(original) !== JSON.stringify(current)) throw new DemoIsolationError();
   return assertDemoInbound(ctx.db, ctx.binding, current);
 }
+/** Preparation is gated before any paid speech call; this does not authorize transport. */
+export async function assertDemoVoicePreparation(org: string, conversation: string): Promise<void> {
+  denyDemoWebAction();
+  if (!demoInboundOnly()) return;
+  const ctx = execution.getStore();
+  if (process.env.DEMO_VOICE_REPLY_CHANNEL_ID !== DEMO_CHANNEL_ID || !ctx ||
+      ctx.binding.channelId !== DEMO_CHANNEL_ID || ctx.binding.organizationId !== org ||
+      ctx.job.payload.conversation_id !== conversation) throw new DemoIsolationError();
+  await assertCurrentDemoJob(ctx);
+}
+/** Default-off test capability: exact boot-bound 0230 job AND canonical prepared audio. */
+export async function demoVoiceRequestAllowed(org: string, conversation?: string, path?: string): Promise<boolean> {
+  if (!demoInboundOnly()) return false;
+  const ctx = execution.getStore();
+  if (process.env.DEMO_VOICE_REPLY_CHANNEL_ID !== DEMO_CHANNEL_ID || !ctx ||
+      ctx.binding.channelId !== DEMO_CHANNEL_ID || ctx.binding.organizationId !== org ||
+      !preparedVoiceMatches(org, conversation, path)) return false;
+  await assertCurrentDemoJob(ctx);
+  return true;
+}
 /** Corte final: limita também o destinatário e a sessão realmente enviados ao provider. */
 export async function assertDemoTransport(input: {
   organizationId: string;
@@ -296,7 +317,8 @@ export async function assertDemoTransport(input: {
   if (await assertDemoStaffDelivery(input.organizationId, undefined, input)) return;
   if (!demoInboundOnly()) return;
   const ctx = execution.getStore();
-  if (!ctx || input.kind !== "text" || input.organizationId !== ctx.binding.organizationId)
+  const voice = input.kind === "audio" && await demoVoiceRequestAllowed(input.organizationId);
+  if (!ctx || (input.kind !== "text" && !voice) || input.organizationId !== ctx.binding.organizationId)
     throw new DemoIsolationError();
   const bound = await assertCurrentDemoJob(ctx);
   if (input.sessionRef !== bound.sessionRef || input.to !== bound.recipient)

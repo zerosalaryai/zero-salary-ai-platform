@@ -6,7 +6,7 @@
  * O drain (decide ENFILEIRAR) e o turno (decide RODAR) chamam isto e passam o
  * resultado para `decidirElegibilidade` — a MESMA regra pura.
  */
-import type pg from "pg";
+import type { Queryable } from "@/lib/agent-engine/queue/queue";
 
 import {
   decidirElegibilidade,
@@ -28,7 +28,7 @@ interface LinhaDeElegibilidade {
  * decidir; o drain trata como "sem gate", segue o fluxo antigo).
  */
 export async function decidirElegibilidadeDaConversa(
-  pool: pg.Pool,
+  pool: Queryable,
   input: { organizationId: string; conversationId: string; agora: Date; ttlMs: number },
 ): Promise<DecisaoDeElegibilidade | null> {
   const { rows } = await pool.query<LinhaDeElegibilidade>(

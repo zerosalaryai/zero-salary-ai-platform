@@ -664,10 +664,15 @@ export async function main(): Promise<void> {
   const log = createLogger();
   const handlers = new Map<JobKind, JobHandler>();
   const turnDeps: FollowupTurnDeps = {
-    crmCfg: crmEdgeConfigFromEnv({
-      SUPABASE_URL: env.NEXT_PUBLIC_SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
-    }),
+    crmCfg: {
+      ...crmEdgeConfigFromEnv({
+        SUPABASE_URL: env.NEXT_PUBLIC_SUPABASE_URL,
+        SUPABASE_SERVICE_ROLE_KEY: env.SUPABASE_SERVICE_ROLE_KEY,
+      }),
+      ...(env.ZSAI_AGENT_RUNTIME === 'python' && env.ZSAI_PYTHON_AGENT_URL && env.ZSAI_INTERNAL_AGENT_SECRET
+        ? { speech: { baseUrl: env.ZSAI_PYTHON_AGENT_URL, secret: env.ZSAI_INTERNAL_AGENT_SECRET,
+            allowlistTtlMs: env.AI_ALLOWLIST_TTL_DAYS * 24 * 60 * 60 * 1000 } } : {}),
+    },
     llmCfg: llmEdgeConfigFromEnv(env),
     knobs: turnKnobsFromEnv(env),
     externalAgent: {
